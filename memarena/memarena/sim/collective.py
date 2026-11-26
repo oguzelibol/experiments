@@ -24,13 +24,13 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from ..actors.protocol import check_result, verify_result
+from ..actors.protocol import CLOCK_AUTHOR, called_off, check_result, exam_posts, settle, verify_result
 from ..evalcore.calibration import EXTERNAL_LOSS, AsymmetricLoss
 from ..evalcore.criteria import CriteriaFamily
 from ..util import sha256_hex
 
 __all__ = [
-    "Signal", "gather_signals", "audit_board", "confirmed_cheats", "reputation", "consensus",
+    "Signal", "Audit", "gather_signals", "audit_record", "audit_board", "confirmed_cheats", "reputation", "consensus",
     "CLASS_CAPABILITIES", "select_champions", "collective_estimate", "verify_result_post",
 ]
 
@@ -80,38 +80,112 @@ def gather_signals(board: Any) -> list[Signal]:
     return [s for s in (_signal(p) for p in board.read(0, kinds=["exam.result"])) if s is not None]
 
 
-def audit_board(board: Any, family: CriteriaFamily, cache: dict | None = None) -> tuple[list[Signal], set[str], set[int]]:
-    """Verify every published result before anything is built on it.
+@dataclass
+class Audit:
+    """What the public record establishes, re-derived by the reader."""
 
-    Returns (signals, examiners with at least one result that does not verify,
-    the seqs of those results).  Each signal carries the numbers recomputed
-    here, never the ones written in the post.  A second result for an exam that
-    already has one is dropped, so nothing is counted twice.  ``cache``
-    (seq -> Verdict) lets repeated calls skip results already checked.
+    signals: list  # one per settled exam, with the numbers settled here
+    cheats: set  # examiners that published a result which does not verify
+    bad: set  # the seqs of those results
+    settled_without_result: int  # exams settled from the record although no valid result was published
+    walkouts: dict  # examiner -> exams it left unfinished after the paper was fixed
+    completion: dict  # examiner -> share of the exams it started that were settled
+
+
+def audit_record(
+    board: Any, family: CriteriaFamily, cache: dict | None = None,
+    exam_size: Sequence[int] | None = None, clock_author: str = CLOCK_AUTHOR,
+) -> Audit:
+    """Verify and settle everything on the board before anything is built on it.
+
+    * Every published result is checked; one that does not verify marks its
+      examiner as a cheat and is discarded.
+    * Every exam whose keys are public is settled here whether or not its
+      examiner published a (valid) result, so keeping a result back, or
+      publishing a false one, does not change what the society learns.
+    * An exam counts once, however many results are posted about it.
+    * An exam the examiner left unfinished after the paper was fixed, without
+      showing that no paper could be drawn (``exam_size`` is needed to check
+      that), is a walkout.  So is one it spoiled, by revealing keys that settle
+      nothing.  An examiner has until the end of the following round.
+
+    ``cache`` lets repeated calls skip what was already settled.
     """
     cache = cache if cache is not None else {}
     signals: list[Signal] = []
     cheats: set[str] = set()
     bad: set[int] = set()
-    seen: set[tuple[str, str]] = set()
-    for post in board.read(0, kinds=["exam.result"]):
-        verdict = cache.get(post.seq)
-        if verdict is None:
-            verdict = cache[post.seq] = check_result(board, post, family)
-        if not verdict.ok:
-            cheats.add(post.author)
-            bad.add(post.seq)
-            continue
-        if (verdict.examiner, verdict.xid) in seen:
-            continue
-        seen.add((verdict.examiner, verdict.xid))
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(verdict, post) -> None:
+        seen.add((verdict.examiner, verdict.examinee, verdict.xid))
         signals.append(
             Signal(
                 xid=verdict.xid, examiner=verdict.examiner, examinee=verdict.examinee, score=verdict.score,
                 n=verdict.n_items, capability=dict(verdict.capability), round=post.round, loss=verdict.loss, seq=post.seq,
             )
         )
-    return signals, cheats, bad
+
+    for post in board.read(0, kinds=["exam.result"]):
+        verdict = cache.get(post.seq)
+        if verdict is None:
+            verdict = cache[post.seq] = check_result(board, post, family, clock_author)
+        if not verdict.ok:
+            cheats.add(post.author)
+            bad.add(post.seq)
+        elif (verdict.examiner, verdict.examinee, verdict.xid) not in seen:
+            add(verdict, post)
+
+    settled_without_result = 0
+    for post in board.read(0, kinds=["exam.keys"]):
+        xid = post.body.get("xid") if isinstance(post.body, Mapping) else None
+        key = (post.author, post.to, xid)
+        if key in seen or not isinstance(xid, str) or not isinstance(post.to, str):
+            continue
+        verdict = cache.get(("settled",) + key)
+        if verdict is None:
+            verdict = settle(board, family, post.author, post.to, xid, clock_author=clock_author)
+            if verdict.ok or not verdict.pending:
+                cache[("settled",) + key] = verdict
+        if verdict.ok:
+            add(verdict, post)
+            settled_without_result += 1
+
+    # Exams an examiner started and then left unfinished or spoiled, once it knew the paper.
+    walkouts: dict[str, int] = {}
+    clocks = [p.seq for p in board.feed(clock_author, kinds=["clock"])]
+    counted: set[tuple[str, str, str]] = set()
+    for post in board.read(0, kinds=["exam.nonce"]):
+        xid = post.body.get("xid") if isinstance(post.body, Mapping) else None
+        key = (post.to, post.author, xid)
+        if key in seen or key in counted or not isinstance(xid, str) or not isinstance(post.to, str):
+            continue
+        if sum(1 for c in clocks if c > post.seq) < 2:
+            continue  # the examiner has the rest of that round and all of the next to finish
+        posts, _theirs, _ours = exam_posts(board, post.to, post.author, xid)
+        if posts.nonce is None or posts.nonce.seq != post.seq:
+            continue  # not the seed share of an exam that was properly started
+        counted.add(key)
+        if posts.keys is not None:
+            # keys are out but nothing settles: every reason for that lies with the examiner
+            spoiled = cache.get(("settled",) + key)
+            if spoiled is None or spoiled.ok or spoiled.pending:
+                continue
+        elif exam_size is not None and called_off(board, post.to, post.author, xid, exam_size):
+            continue
+        walkouts[post.to] = walkouts.get(post.to, 0) + 1
+
+    done: dict[str, int] = {}
+    for s_ in signals:
+        done[s_.examiner] = done.get(s_.examiner, 0) + 1
+    completion = {e: done.get(e, 0) / (done.get(e, 0) + w) for e, w in walkouts.items()}
+    return Audit(signals, cheats, bad, settled_without_result, walkouts, completion)
+
+
+def audit_board(board: Any, family: CriteriaFamily, cache: dict | None = None) -> tuple[list[Signal], set[str], set[int]]:
+    """(signals, examiners with a result that does not verify, the seqs of those results).  See ``audit_record``."""
+    audit = audit_record(board, family, cache)
+    return audit.signals, audit.cheats, audit.bad
 
 
 def confirmed_cheats(board: Any, family: CriteriaFamily) -> tuple[set[str], set[int]]:

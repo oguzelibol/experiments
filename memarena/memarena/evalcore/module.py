@@ -35,7 +35,7 @@ __all__ = [
     "CapabilityTable",
     "code_hash",
     "keys_commitment",
-    "recompute_receipt",
+    "recompute_receipt", "compare_receipt",
     "verify_receipt",
     "expected_score",
 ]
@@ -233,6 +233,45 @@ def _finite(x) -> bool:
     return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x))
 
 
+def compare_receipt(receipt: Mapping, fresh: Mapping, tolerance: float = 1e-6) -> tuple[bool, str]:
+    """Does a claimed receipt say what a recomputed one says?  Every field is compared.
+
+    A number that is NaN or infinite never compares equal, so it cannot be used
+    to switch a check off.
+    """
+    if not isinstance(receipt, Mapping):
+        return False, "the receipt is not a record"
+    if fresh["keys_commit"] != receipt.get("keys_commit"):
+        return False, "revealed keys do not match the commitment"
+    if fresh["evaluator"] != receipt.get("evaluator"):
+        return False, "evaluator fingerprint mismatch (different grading code, judges or standard)"
+    if fresh["subject"] != receipt.get("subject"):
+        return False, "answers differ from the ones that were graded"
+    if fresh["items_root"] != receipt.get("items_root"):
+        return False, "per-item grading records differ"
+    if receipt.get("n_items") != fresh["n_items"] or receipt.get("not_answered") != fresh["not_answered"]:
+        return False, "item counts differ"
+    claimed_score = receipt.get("score")
+    if not _finite(claimed_score) or abs(fresh["score"] - float(claimed_score)) > tolerance:
+        return False, f"score differs: recomputed {fresh['score']:.6f}, claimed {claimed_score!r}"
+    claimed_cap = receipt.get("capability")
+    if not isinstance(claimed_cap, Mapping) or set(claimed_cap) != set(fresh["capability"]):
+        return False, "receipt does not list exactly the abilities that were examined"
+    for cap, (s, n) in fresh["capability"].items():
+        got = claimed_cap[cap]
+        if (
+            not isinstance(got, (list, tuple)) or len(got) != 2 or not _finite(got[0])
+            or abs(float(got[0]) - s) > tolerance or got[1] != n
+        ):
+            return False, f"capability score differs for {cap}"
+    try:
+        if Standard.from_dict(receipt["standard"]).fingerprint() != Standard.from_dict(fresh["standard"]).fingerprint():
+            return False, "the receipt names a different standard"
+    except (KeyError, ValueError, TypeError):
+        return False, "the receipt's standard is malformed"
+    return True, "ok"
+
+
 def recompute_receipt(
     receipt: Mapping,
     answers: Mapping[str, Answer],
@@ -244,10 +283,8 @@ def recompute_receipt(
 ) -> tuple[bool, str, dict]:
     """Recompute an evaluation from keys and answers and compare it with its receipt.
 
-    Returns (ok, reason, recomputed receipt).  Every field of the receipt is
-    compared; a number that is NaN or infinite never compares equal, so it
-    cannot be used to switch a check off.  Callers should use the recomputed
-    values afterwards, not the claimed ones.
+    Returns (ok, reason, recomputed receipt).  Callers should use the
+    recomputed values afterwards, not the claimed ones.
     """
     try:
         standard = Standard.from_dict(receipt["standard"])
@@ -257,28 +294,8 @@ def recompute_receipt(
     if keys_commitment(instances, salt) != receipt.get("keys_commit"):
         return False, "revealed keys do not match the commitment", {}
     fresh = dict(module.evaluate(answers, instances, salt).receipt)
-    if fresh["evaluator"] != receipt.get("evaluator"):
-        return False, "evaluator fingerprint mismatch (different grading code, judges or standard)", fresh
-    if fresh["subject"] != receipt.get("subject"):
-        return False, "answers differ from the ones that were graded", fresh
-    if fresh["items_root"] != receipt.get("items_root"):
-        return False, "per-item grading records differ", fresh
-    if receipt.get("n_items") != fresh["n_items"] or receipt.get("not_answered") != fresh["not_answered"]:
-        return False, "item counts differ", fresh
-    claimed_score = receipt.get("score")
-    if not _finite(claimed_score) or abs(fresh["score"] - float(claimed_score)) > tolerance:
-        return False, f"score differs: recomputed {fresh['score']:.6f}, claimed {claimed_score!r}", fresh
-    claimed_cap = receipt.get("capability")
-    if not isinstance(claimed_cap, Mapping) or set(claimed_cap) != set(fresh["capability"]):
-        return False, "receipt does not list exactly the abilities that were examined", fresh
-    for cap, (s, n) in fresh["capability"].items():
-        got = claimed_cap[cap]
-        if (
-            not isinstance(got, (list, tuple)) or len(got) != 2 or not _finite(got[0])
-            or abs(float(got[0]) - s) > tolerance or got[1] != n
-        ):
-            return False, f"capability score differs for {cap}", fresh
-    return True, "ok", fresh
+    ok, why = compare_receipt(receipt, fresh, tolerance)
+    return ok, why, fresh
 
 
 def verify_receipt(

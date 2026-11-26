@@ -34,13 +34,14 @@ from ..benchmark.schema import Answer, AnswerKey, Instance, Probe, Session, Turn
 from ..benchmark.synthetic import generate
 from ..evalcore.calibration import PEER_LOSS, AsymmetricLoss, binomial_sd
 from ..evalcore.criteria import CriteriaFamily
-from ..evalcore.module import CapabilityTable, EvaluationModule, expected_score, verify_receipt
+from ..evalcore.module import CapabilityTable, EvaluationModule, expected_score, keys_commitment
 from ..evalcore.standard import CAPABILITIES, Standard, normalise
 from ..memory.base import MemorySystem, run_system
 from ..memory.heuristic import FEATURES, STYLES, HeuristicMemory, MemoryConfig
-from ..util import commit, make_rng, sha256_hex, verify_commit
+from ..feeds.board import blob_address
+from ..util import commit, make_rng, sha256_hex
 from .protocol import (
-    check_result, derive_exam_share, joint_exam_seed, pack_probes, share_commitment, unpack_probes,
+    called_off, check_result, derive_exam_share, joint_exam_seed, pack_probes, settle, share_commitment, unpack_probes,
 )
 
 __all__ = ["WorldRules", "UnitPolicy", "UnitSpec", "Unit", "PeerView", "pack_probes", "unpack_probes", "mutate_config"]
@@ -233,7 +234,8 @@ class Unit:
         self._published: tuple | None = None
         self.known: dict[str, PeerView] = {}
         self.attention: list[tuple[str, float]] = []  # (peer, weight), strongest first
-        self._set: dict[str, dict] = {}  # exams I set, by xid
+        self._set: dict[tuple[str, str], dict] = {}  # exams I set, by (examinee, exam id)
+        self._standards: list[tuple[int, EvaluationModule]] = []  # my published standards, by position on the chain
         self._sat: dict[str, dict] = {}  # exams I sit, by xid
         self._served = 0
         self._exam_counter = 0
@@ -242,7 +244,8 @@ class Unit:
         self._plan: dict = {}  # advice from the brain for the coming round
         self.round = 0
         self.log: list[dict] = []  # adopted changes, audits: for analysis
-        self.stats = {"exams_set": 0, "exams_sat": 0, "audits": 0, "audit_fails": 0, "adoptions": 0, "trials": 0}
+        self.stats = {"exams_set": 0, "exams_sat": 0, "audits": 0, "audit_fails": 0, "adoptions": 0, "trials": 0,
+                      "exams_called_off": 0, "results_settled_myself": 0, "walkouts": 0}
 
     # ------------------------------------------------------------ utilities
     def _rng(self, *parts):
@@ -321,8 +324,9 @@ class Unit:
             body["design"] = self.memory_cfg.to_dict()
         key = (std.fingerprint(), self.version, tuple(body["attending"]))
         if key != self._published:
-            self._post("profile", body)
+            post = self._post("profile", body)
             self._published = key
+            self._standards.append((post.seq, self.eval))
 
     # ---------------------------------------------------------------- feeds
     def _read_feeds(self) -> None:
@@ -448,8 +452,8 @@ class Unit:
         """Handle one post addressed to me.  A malformed post is ignored, never fatal."""
         handler = {
             "exam.request": self._on_request, "exam.ready": self._on_ready, "exam.nonce": self._on_nonce,
-            "exam.offer": self._on_offer, "exam.answers": self._on_answers, "exam.graded": self._on_graded,
-            "exam.guess": self._on_guess, "exam.result": self._on_result,
+            "exam.offer": self._on_offer, "exam.sealed": self._on_sealed, "exam.keys": self._on_keys,
+            "exam.open": self._on_open, "exam.result": self._on_result,
         }.get(post.kind)
         if handler is None or not isinstance(post.body, Mapping):
             return
@@ -462,39 +466,47 @@ class Unit:
     # -- as examiner
     def _on_request(self, post) -> None:
         xid = post.body.get("xid")
-        if not isinstance(xid, str) or not xid or xid in self._set or post.author == self.id:
+        key = (post.author, xid)
+        if not isinstance(xid, str) or not xid or key in self._set or post.author == self.id:
             return
-        if self._served >= self.policy.serve_capacity or self.table is None:
+        # The exam is set under the standard I had published when it was asked for, even if I have
+        # changed my mind since: the examinee chose the moment, so I cannot have chosen the standard.
+        module = next((m for seq, m in reversed(self._standards) if seq < post.seq), None)
+        if self._served >= self.policy.serve_capacity or self.table is None or module is None:
             self._post("exam.decline", {"xid": xid}, to=post.author)
             return
         self._served += 1
         self._exam_counter += 1
         share = derive_exam_share(self.spec.seed, self.id, self._exam_counter)
-        # The standard in force now is frozen for this exam, even if I change my mind before grading.
-        self._set[xid] = {
-            "examinee": post.author, "share": share, "module": self.eval, "request_seq": post.seq,
-            "round": self.round,
-        }
-        ready = self._post("exam.ready", {"xid": xid, "share_commit": share_commitment(share)}, to=post.author)
-        self._set[xid]["ready_seq"] = ready.seq
+        self._set[key] = {"examinee": post.author, "xid": xid, "share": share, "module": module, "round": self.round}
+        self._post("exam.ready", {"xid": xid, "share_commit": share_commitment(share)}, to=post.author)
 
     def _on_nonce(self, post) -> None:
         xid = post.body.get("xid")
-        st = self._set.get(xid)
+        st = self._set.get((post.author, xid))
         nonce = post.body.get("nonce")
-        if st is None or st["examinee"] != post.author or "exam" in st or not isinstance(nonce, str) or not nonce:
+        if st is None or "offer_seq" in st or st.get("done") or not isinstance(nonce, str) or not nonce:
             return
         module: EvaluationModule = st["module"]
-        exam = self._draw_exam(post.author, joint_exam_seed(st["share"], nonce, xid), module)
+        try:
+            exam = self._draw_exam(post.author, joint_exam_seed(st["share"], nonce, xid), module)
+        except ValueError as exc:
+            # This seed cannot be expanded into the exam my standard describes.  I may not try another
+            # seed, since that would be choosing the paper, so the exam is called off, and I show the
+            # share so anyone can see that it could not be.
+            st["done"] = True
+            self.stats["exams_called_off"] += 1
+            self.log.append({"round": self.round, "event": "exam_called_off", "examinee": post.author, "why": str(exc)[:200]})
+            self._post("exam.decline", {"xid": xid, "reason": "no exam could be drawn for this seed", "share": st["share"]},
+                       to=post.author)
+            return
         salt = sha256_hex(f"{self.spec.seed}:{self.id}:salt:{xid}")[:20]
         probes_blob = self.board.put_blob(pack_probes(exam.probes()))
-        from ..evalcore.module import keys_commitment
-
-        st.update(exam=exam, salt=salt, probes=probes_blob, nonce_seq=post.seq)
+        st.update(exam=exam, salt=salt, offer_round=self.round)
         offer = self._post(
             "exam.offer",
             {
-                "xid": xid, "probes": probes_blob, "n": len(exam),
+                "xid": xid, "probes": probes_blob, "blobs": [probes_blob], "n": len(exam),
                 "keys_commit": keys_commitment(exam.instances, salt),
                 "standard": module.standard.to_dict(), "evaluator": module.fingerprint(),
                 "loss": self.rules.peer_loss.to_dict(),
@@ -504,67 +516,70 @@ class Unit:
         )
         st["offer_seq"] = offer.seq
 
-    def _on_answers(self, post) -> None:
-        xid = post.body.get("xid")
-        st = self._set.get(xid)
-        if st is None or st["examinee"] != post.author or "exam" not in st or "evaluation" in st:
+    def _on_sealed(self, post) -> None:
+        st = self._set.get((post.author, post.body.get("xid")))
+        if st is None or "offer_seq" not in st or "keys_round" in st or st.get("done"):
             return
         if post.body.get("offer_seq") != st["offer_seq"]:
-            return  # not an answer to the paper I set
-        answers = {str(pid): Answer.from_dict(a) for pid, a in self.board.get_blob(post.body["answers"]).items()}
-        evaluation = st["module"].evaluate(answers, st["exam"].instances, st["salt"])
-        payload = self._result_payload(post.author, evaluation)
-        nonce = sha256_hex(f"{self.spec.seed}:{self.id}:rnonce:{xid}")[:20]
-        st.update(evaluation=evaluation, payload=payload, nonce=nonce, answers_seq=post.seq,
-                  answers_blob=post.body["answers"], guess_commit=str(post.body.get("guess_commit", "")))
-        graded = self._post("exam.graded", {"xid": xid, "result_commit": commit(payload["score"], nonce)}, to=post.author)
-        st["graded_seq"] = graded.seq
-        st["graded_round"] = self.round
+            return  # not a commitment to answers for the paper I set
+        self._reveal_keys(st)
 
-    def _on_guess(self, post) -> None:
-        xid = post.body.get("xid")
-        st = self._set.get(xid)
-        if st is None or st["examinee"] != post.author or "payload" not in st or st.get("done"):
+    def _reveal_keys(self, st: dict) -> None:
+        """Make the keys public.  From here on anyone can grade this exam, and I can no longer affect it."""
+        st["keys_round"] = self.round
+        self._post("exam.keys", {"xid": st["xid"], "share": st["share"], "salt": st["salt"]}, to=st["examinee"])
+
+    def _on_open(self, post) -> None:
+        st = self._set.get((post.author, post.body.get("xid")))
+        if st is None or "keys_round" not in st or st.get("done"):
             return
-        guess = post.body.get("guess")
-        valid = (
-            isinstance(guess, (int, float)) and not isinstance(guess, bool) and math.isfinite(float(guess))
-            and verify_commit(st["guess_commit"], guess, str(post.body.get("nonce", "")))
-        )
-        self._publish_result(xid, st, min(1.0, max(0.0, float(guess))) if valid else 1.0, bool(valid), post.seq)
+        self._publish_result(st)
 
-    def _publish_result(self, xid: str, st: dict, guess: float, valid: bool, guess_seq: int | None) -> None:
-        """Publish the outcome of an exam: the public signal about the examinee."""
-        payload = st["payload"]
-        loss = self.rules.peer_loss(guess, payload["score"])
+    def _settle(self, examiner: str, examinee: str, xid: str):
+        """What an exam established, computed the way anyone would (see ``protocol.settle``)."""
+        return settle(self.board, self.eval.family, examiner, examinee, xid)
+
+    def _publish_result(self, st: dict) -> None:
+        """Publish the outcome of an exam I set: the public signal about the examinee.
+
+        The numbers are not mine to choose.  They are the ones the public
+        record yields for anyone who settles the exam.
+        """
+        verdict = self._settle(self.id, st["examinee"], st["xid"])
+        if not verdict.ok:
+            if not verdict.pending:
+                st["done"] = True
+                self.log.append({"round": self.round, "event": "exam_unsettled", "examinee": st["examinee"], "why": verdict.reason})
+            return
+        payload = self._result_payload(st["examinee"], verdict)
         st["done"] = True
+        st.pop("exam", None)  # the keys are public; the paper is spent
         self.stats["exams_set"] += 1
         self._post(
             "exam.result",
             {
-                "xid": xid, "examinee": st["examinee"], **payload,
-                "guess": guess, "guess_valid": valid, "loss": loss,
-                "probes": st["probes"], "answers": st["answers_blob"],
-                "salt": st["salt"], "nonce": st["nonce"], "share": st["share"],
-                "request_seq": st["request_seq"], "ready_seq": st["ready_seq"], "nonce_seq": st["nonce_seq"],
-                "offer_seq": st["offer_seq"], "answers_seq": st["answers_seq"], "graded_seq": st["graded_seq"],
-                "guess_seq": guess_seq,
+                "xid": st["xid"], "examinee": st["examinee"], **payload,
+                "guess": verdict.guess, "guess_valid": verdict.guess_valid, "loss": verdict.loss, "void": verdict.void,
             },
             to=st["examinee"],
         )
-        n = int(payload["receipt"]["n_items"])
-        self.view(st["examinee"]).first_hand.append((float(payload["score"]), n, float(loss), self.round))
-        st.pop("exam", None)  # the seed share is public now; the paper is spent
+        self.view(st["examinee"]).first_hand.append((float(verdict.score), int(verdict.n_items), float(verdict.loss), self.round))
 
     def _close_unopened(self) -> None:
-        """Exams whose examinee never opened its self-estimate are published once the round is over.
+        """Settle exams whose examinee went silent, once the round they were due in is over.
 
-        Otherwise an examinee could make a bad grade disappear by going silent.
-        The unopened estimate counts as the maximal claim.
+        An examinee that has seen the questions, or the keys, cannot make the
+        exam disappear by saying nothing: every answer counts as missing.
         """
-        for xid, st in list(self._set.items()):
-            if "payload" in st and not st.get("done") and st.get("graded_round", self.round) < self.round:
-                self._publish_result(xid, st, 1.0, False, None)
+        for st in list(self._set.values()):
+            if st.get("done") or "offer_seq" not in st:
+                continue
+            if "keys_round" not in st:
+                if st["offer_round"] < self.round:  # saw the questions, sealed nothing
+                    self._reveal_keys(st)
+                    self._publish_result(st)
+            elif st["keys_round"] < self.round:  # sealed, saw the keys, opened nothing
+                self._publish_result(st)
 
     # -- as examinee
     def _on_ready(self, post) -> None:
@@ -578,7 +593,7 @@ class Unit:
     def _on_offer(self, post) -> None:
         xid = post.body.get("xid")
         st = self._sat.get(xid)
-        if st is None or st.get("examiner") != post.author or "nonce" not in st or "answers" in st:
+        if st is None or st.get("examiner") != post.author or "nonce" not in st or "sheet" in st:
             return
         # I only sit exams on the terms this world runs on.
         if post.body.get("loss") != self.rules.peer_loss.to_dict():
@@ -593,22 +608,38 @@ class Unit:
         answers = self._answer_exam(probes, post.author, xid)
         mean, sd = self._predict(standard, len(probes), post.author)
         guess = self._make_guess(mean, sd)
-        guess_nonce = sha256_hex(f"{self.spec.seed}:{self.id}:nonce:{xid}")[:20]
-        answers_blob = self.board.put_blob({pid: a.to_dict() for pid, a in sorted(answers.items())})
-        st.update(answers=answers, guess=guess, guess_nonce=guess_nonce, predicted=mean, offer_seq=post.seq)
+        sheet = {pid: a.to_dict() for pid, a in sorted(answers.items())}
+        st.update(
+            sheet=sheet, guess=guess, predicted=mean,
+            answers_nonce=sha256_hex(f"{self.spec.seed}:{self.id}:answers-nonce:{xid}")[:20],
+            guess_nonce=sha256_hex(f"{self.spec.seed}:{self.id}:nonce:{xid}")[:20],
+        )
+        # Commitments only: the answers themselves stay with me until the keys are public.
         self._post(
-            "exam.answers",
-            {"xid": xid, "answers": answers_blob, "guess_commit": commit(guess, guess_nonce), "offer_seq": post.seq},
+            "exam.sealed",
+            {
+                "xid": xid, "offer_seq": post.seq,
+                "answers_commit": commit(blob_address(sheet), st["answers_nonce"]),
+                "guess_commit": commit(guess, st["guess_nonce"]),
+            },
             to=post.author,
         )
 
-    def _on_graded(self, post) -> None:
+    def _on_keys(self, post) -> None:
         xid = post.body.get("xid")
         st = self._sat.get(xid)
-        if st is None or st.get("examiner") != post.author or "guess" not in st or "result_commit" in st:
+        if st is None or st.get("examiner") != post.author or "sheet" not in st or "opened_round" in st:
             return
-        st["result_commit"] = str(post.body.get("result_commit", ""))
-        self._post("exam.guess", {"xid": xid, "guess": st["guess"], "nonce": st["guess_nonce"]}, to=post.author)
+        st["opened_round"] = self.round
+        sheet = self.board.put_blob(st["sheet"])
+        self._post(
+            "exam.open",
+            {
+                "xid": xid, "answers": sheet, "blobs": [sheet], "answers_nonce": st["answers_nonce"],
+                "guess": st["guess"], "guess_nonce": st["guess_nonce"],
+            },
+            to=post.author,
+        )
 
     def _on_result(self, post) -> None:
         xid = post.body.get("xid")
@@ -621,14 +652,57 @@ class Unit:
             # including a result about an exam I never sat: it has no transcript of mine to point at
             self._flag(post.author, post.seq, verdict.reason)
             return
-        if st is None or st.get("examiner") != post.author or st.get("done"):
+        if st is None or st.get("examiner") != post.author:
+            return
+        self._record_sat(st, verdict)
+
+    def _record_sat(self, st: dict, verdict) -> None:
+        """Note what an exam I sat established.  The numbers are the settled ones, never a post's."""
+        if st.get("done"):
             return
         st["done"] = True
+        st.pop("sheet", None)
         self.stats["exams_sat"] += 1
-        # record what I recomputed, not what the post says
-        self.view(post.author).signals.append(
+        self.view(st["examiner"]).signals.append(
             (dict(verdict.capability), verdict.score, verdict.n_items, self.round, st.get("predicted"))
         )
+
+    def _note_walkouts(self) -> None:
+        """Examiners that learned the paper and then left my exam unfinished.
+
+        Once I have contributed my share of the seed the examiner knows the
+        paper.  If it then goes quiet, it may be choosing which exams to
+        finish, so each walkout halves what its word is worth to me.  An
+        examiner that shows no paper could be drawn is excused.
+        """
+        size = (self.rules.exam_streams, self.rules.exam_questions)
+        for xid, st in list(self._sat.items()):
+            # the examiner has had the rest of that round and all of the next
+            if st.get("done") or "nonce" not in st or "opened_round" in st or st["round"] + 1 >= self.round:
+                continue
+            st["done"] = True
+            st.pop("sheet", None)
+            if called_off(self.board, st["examiner"], self.id, xid, size):
+                continue
+            self.stats["walkouts"] += 1
+            self.view(st["examiner"]).integrity *= 0.5
+            self.log.append({"round": self.round, "event": "walkout", "examiner": st["examiner"]})
+
+    def _settle_unreported(self) -> None:
+        """Exams I opened my answers for but never got a result on: I settle them myself.
+
+        The keys are public, so the grade does not depend on the examiner
+        saying it.  An examiner gains nothing by keeping a result back.
+        """
+        for xid, st in list(self._sat.items()):
+            if st.get("done") or "opened_round" not in st or st["opened_round"] >= self.round:
+                continue
+            verdict = self._settle(st["examiner"], self.id, xid)
+            if verdict.ok:
+                self.stats["results_settled_myself"] += 1
+                self._record_sat(st, verdict)
+            elif not verdict.pending:
+                st["done"] = True
 
     # ---------------------------------------------------------------- esteem
     def _update_esteem(self) -> None:
@@ -806,6 +880,8 @@ class Unit:
         self.round = round_
         self._served = 0
         self._close_unopened()
+        self._settle_unreported()
+        self._note_walkouts()
         self._refresh_profile()
         self._update_specialties()
         self._read_feeds()
@@ -837,7 +913,7 @@ class Unit:
         for peer in self._choose_examiners():
             self._request_counter += 1
             xid = f"{self.id}>{peer}#{self._request_counter}"
-            self._sat[xid] = {"examiner": peer}
+            self._sat[xid] = {"examiner": peer, "round": self.round}
             self._post("exam.request", {"xid": xid}, to=peer)
 
     def end_round(self) -> None:

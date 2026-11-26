@@ -9,25 +9,28 @@ import pytest
 
 from memarena.actors.brain import LLMBrain
 from memarena.actors.protocol import (
-    check_result, derive_exam_share, joint_exam_seed, pack_probes, share_commitment, unpack_probes, verify_result,
+    check_result, derive_exam_share, exam_posts, joint_exam_seed, pack_probes, settle, share_commitment, unpack_probes,
+    verify_result,
 )
 from memarena.actors.unit import Unit, UnitPolicy, clamp_config, mutate_config
 from memarena.benchmark.schema import Answer
 from memarena.benchmark.synthetic import GenConfig, generate
+from memarena.evalcore.calibration import PEER_LOSS
 from memarena.evalcore.criteria import CriteriaFamily
-from memarena.evalcore.module import EvaluationModule
+from memarena.evalcore.module import EvaluationModule, keys_commitment
 from memarena.evalcore.standard import CAPABILITIES, Standard
-from memarena.feeds.board import AuthorBoard, Board
+from memarena.feeds.board import AuthorBoard, Board, blob_address
 from memarena.feeds.http import BoardClient, BoardServer
 from memarena.llm.client import MockLLM
+from memarena.memory.base import ABSTAIN_TEXT
 from memarena.memory.heuristic import FEATURES, MemoryConfig
-from memarena.sim.collective import Signal, audit_board, consensus, gather_signals, reputation
+from memarena.sim.collective import Signal, audit_board, audit_record, consensus, gather_signals, reputation
 from memarena.sim.engine import ExternalConfig, Scenario, Simulation, random_population, spearman, unit_secret
-from memarena.util import canonical_json, make_rng
+from memarena.util import canonical_json, commit, make_rng
 
 POLICY = UnitPolicy(specialty_focus=0.8, niche=1.0, crowd_aversion=0.3, holdout_streams=5, dev_streams=3)
 FAMILY = CriteriaFamily.default()
-EXAM_KINDS = ["exam.request", "exam.ready", "exam.nonce", "exam.offer", "exam.answers", "exam.graded", "exam.guess", "exam.result"]
+EXAM_KINDS = ["exam.request", "exam.ready", "exam.nonce", "exam.offer", "exam.sealed", "exam.keys", "exam.open", "exam.result"]
 
 
 def small_world(seed=1, rounds=4, n=5):
@@ -113,6 +116,7 @@ def test_every_published_result_verifies(honest_run):
     results = sim.board.read(0, kinds=["exam.result"])
     assert results and all(verify_result(sim.board, p, FAMILY) == (True, "ok") for p in results)
     assert result.metrics["audit_fails"] == 0 and result.metrics["cheats_confirmed"] == []
+    assert result.metrics["settled_without_result"] == 0 and result.metrics["walkouts"] == 0
 
 
 def test_self_and_peer_evaluation_are_the_same_computation(honest_run):
@@ -120,25 +124,36 @@ def test_self_and_peer_evaluation_are_the_same_computation(honest_run):
     sim, _ = honest_run
     post = sim.board.read(0, kinds=["exam.result"])[0]
     b = post.body
-    nonce = sim.board.read(since_seq=b["nonce_seq"] - 1, limit=1)[0].body["nonce"]
-    standard = Standard.from_dict(b["receipt"]["standard"])
-    exam = generate(joint_exam_seed(b["share"], nonce, b["xid"]), standard.gen_config(2, 12))
-    answers = {pid: Answer.from_dict(a) for pid, a in sim.board.get_blob(b["answers"]).items()}
-    direct = EvaluationModule(standard).evaluate(answers, exam.instances, b["salt"])
+    posts, theirs, _ours = exam_posts(sim.board, post.author, b["examinee"], b["xid"])
+    opened = next(p for p in theirs if p.kind == "exam.open")
+    standard = Standard.from_dict(posts.offer.body["standard"])
+    exam = generate(joint_exam_seed(posts.keys.body["share"], posts.nonce.body["nonce"], b["xid"]), standard.gen_config(2, 12))
+    answers = {pid: Answer.from_dict(a) for pid, a in sim.board.get_blob(opened.body["answers"]).items()}
+    direct = EvaluationModule(standard).evaluate(answers, exam.instances, posts.keys.body["salt"])
     assert canonical_json(direct.receipt) == canonical_json(b["receipt"])
     # the grading entry point has no way to be told whose answers these are
     assert set(inspect.signature(EvaluationModule.evaluate).parameters) == {"self", "answers", "instances", "salt"}
+    # and anyone who settles the exam from the record gets the same numbers without reading the result
+    settled = settle(sim.board, FAMILY, post.author, b["examinee"], b["xid"])
+    assert settled.ok and canonical_json(settled.receipt) == canonical_json(b["receipt"])
+    assert abs(settled.loss - b["loss"]) < 1e-6 and settled.guess_valid is b["guess_valid"]
 
 
-def test_neither_side_chooses_the_paper(honest_run):
+def test_neither_side_chooses_the_paper_or_sees_the_other_first(honest_run):
     sim, _ = honest_run
-    post = sim.board.read(0, kinds=["exam.result"])[0]
-    b = post.body
-    ready = sim.board.read(since_seq=b["ready_seq"] - 1, limit=1)[0]
-    nonce = sim.board.read(since_seq=b["nonce_seq"] - 1, limit=1)[0]
-    assert ready.seq < nonce.seq  # the examiner was committed before it saw the examinee's share
-    assert ready.body["share_commit"] == share_commitment(b["share"])
-    assert joint_exam_seed(b["share"], nonce.body["nonce"], b["xid"]) != joint_exam_seed(b["share"], nonce.body["nonce"] + "x", b["xid"])
+    for post in sim.board.read(0, kinds=["exam.result"]):
+        b = post.body
+        posts, theirs, _ours = exam_posts(sim.board, post.author, b["examinee"], b["xid"])
+        opened = next(p for p in theirs if p.kind == "exam.open")
+        # the examiner was committed to its seed share before it saw the examinee's
+        assert posts.ready.seq < posts.nonce.seq < posts.offer.seq
+        assert posts.ready.body["share_commit"] == share_commitment(posts.keys.body["share"])
+        # the examinee was bound to its answers before the keys were public,
+        # and the examiner gave the keys away before it could read the answers
+        assert posts.sealed.seq < posts.keys.seq < opened.seq < post.seq
+        assert "answers" not in posts.sealed.body and opened.body["answers"] not in json.dumps(posts.sealed.body)
+    share, nonce, xid = posts.keys.body["share"], posts.nonce.body["nonce"], b["xid"]
+    assert joint_exam_seed(share, nonce, xid) != joint_exam_seed(share, nonce + "x", xid)
     assert derive_exam_share("s", "u", 1) != derive_exam_share("s", "u", 2)
     assert "secret-master-seed" not in derive_exam_share("secret-master-seed", "u", 1)
 
@@ -148,6 +163,194 @@ def test_unit_secrets_do_not_reveal_the_world():
     assert a != b and "world-7" not in a
     specs = random_population(3, seed="world-7")
     assert all("world-7" not in str(s.seed) for s in specs)
+
+
+# ------------------------------------------------- one exam, run by hand
+
+class Desk:
+    """Two parties running one exam by hand on a bare board, one post at a time."""
+
+    def __init__(self, standard=None, published=None, size=(2, 12)):
+        self.board = Board()
+        self.xid, self.size = "st>ex#1", size
+        self.standard = standard or Standard({"judge_lenient|detect|micro": 1.0})
+        self.round = 0
+        self.tick()
+        self.publish(published or self.standard)
+        self.share, self.nonce, self.salt = derive_exam_share("examiner-secret", "ex", 1), "examinee-nonce", "key-salt"
+        self.exam = generate(joint_exam_seed(self.share, self.nonce, self.xid), self.standard.gen_config(*size))
+        self.sheet = {i.probe_id: Answer(ABSTAIN_TEXT if i.key.is_abstention else i.key.answer).to_dict() for i in self.exam}
+
+    def tick(self):
+        self.round += 1
+        return self.board.post("env", "clock", {"round": self.round}, round=self.round)
+
+    def publish(self, standard):
+        return self.board.post("ex", "profile", {"standard": standard.to_dict()})
+
+    def request(self):
+        return self.board.post("st", "exam.request", {"xid": self.xid}, to="ex")
+
+    def ready(self, share=None):
+        return self.board.post("ex", "exam.ready", {"xid": self.xid, "share_commit": share_commitment(share or self.share)}, to="st")
+
+    def send_nonce(self):
+        return self.board.post("st", "exam.nonce", {"xid": self.xid, "nonce": self.nonce}, to="ex")
+
+    def offer(self, exam=None, standard=None):
+        exam = exam or self.exam
+        probes = self.board.put_blob(pack_probes(exam.probes()))
+        self.offer_post = self.board.post("ex", "exam.offer", {
+            "xid": self.xid, "probes": probes, "blobs": [probes], "n": len(exam),
+            "keys_commit": keys_commitment(exam.instances, self.salt), "standard": (standard or self.standard).to_dict(),
+            "loss": PEER_LOSS.to_dict(), "exam_size": list(self.size),
+        }, to="st")
+        return self.offer_post
+
+    def seal(self, sheet=None, guess=0.9):
+        return self.board.post("st", "exam.sealed", {
+            "xid": self.xid, "offer_seq": self.offer_post.seq,
+            "answers_commit": commit(blob_address(sheet if sheet is not None else self.sheet), "a-nonce"),
+            "guess_commit": commit(guess, "g-nonce"),
+        }, to="ex")
+
+    def keys(self, share=None):
+        return self.board.post("ex", "exam.keys", {"xid": self.xid, "share": share or self.share, "salt": self.salt}, to="st")
+
+    def open(self, sheet=None, guess=0.9, guess_nonce="g-nonce"):
+        stored = self.board.put_blob(sheet if sheet is not None else self.sheet)
+        return self.board.post("st", "exam.open", {
+            "xid": self.xid, "answers": stored, "blobs": [stored], "answers_nonce": "a-nonce",
+            "guess": guess, "guess_nonce": guess_nonce,
+        }, to="ex")
+
+    def upto_offer(self, **offer):
+        self.request(); self.ready(); self.send_nonce()
+        return self.offer(**offer)
+
+    def settle(self):
+        return settle(self.board, FAMILY, "ex", "st", self.xid)
+
+
+def test_anyone_can_settle_an_exam_without_the_examiner():
+    desk = Desk()
+    desk.upto_offer(); desk.seal(); desk.keys()
+    assert desk.settle().pending  # the examinee still has time to open
+    desk.open()
+    verdict = desk.settle()
+    assert verdict.ok and verdict.score == 1.0 and verdict.void == "" and verdict.n_items == 24
+    assert verdict.guess == 0.9 and verdict.guess_valid and abs(verdict.loss - PEER_LOSS(0.9, 1.0)) < 1e-9
+    assert not desk.board.read(0, kinds=["exam.result"])  # nobody had to publish anything for that
+    signals, cheats, _ = audit_board(desk.board, FAMILY)
+    assert not cheats and [(s.examiner, s.examinee, s.score) for s in signals] == [("ex", "st", 1.0)]
+
+
+def test_the_examinee_is_bound_to_what_it_sealed():
+    blank = {}
+    # sealed a blank sheet, then tried to open the perfect one once the keys were public
+    desk = Desk()
+    desk.upto_offer(); desk.seal(sheet=blank); desk.keys(); desk.open()
+    assert desk.settle().pending
+    desk.tick()
+    late = desk.settle()
+    assert late.ok and late.void == "open" and late.score == 0.0 and not late.guess_valid and late.guess == 1.0
+    # a second, better commitment posted before the keys changes nothing: the first one binds
+    desk = Desk()
+    desk.upto_offer(); desk.seal(sheet=blank); desk.seal(); desk.keys(); desk.open(); desk.tick()
+    assert desk.settle().score == 0.0
+    # opening the sealed sheet with a self-estimate other than the sealed one: graded, but the claim is void
+    desk = Desk()
+    desk.upto_offer(); desk.seal(guess=0.2); desk.keys(); desk.open(guess=0.9)
+    verdict = desk.settle()
+    assert verdict.ok and verdict.score == 1.0 and not verdict.guess_valid and verdict.guess == 1.0
+
+
+def test_going_silent_does_not_make_an_exam_disappear():
+    # saw the questions, sealed nothing: zero, but only once the round is over
+    desk = Desk()
+    desk.upto_offer(); desk.keys()
+    assert not desk.settle().ok and "before the examinee had until the end of the round" in desk.settle().reason
+    desk = Desk()
+    desk.upto_offer(); desk.tick(); desk.keys()
+    verdict = desk.settle()
+    assert verdict.ok and verdict.void == "sealed" and verdict.score == 0.0 and verdict.n_items == 24
+    # sealed, saw the keys, opened nothing
+    desk = Desk()
+    desk.upto_offer(); desk.seal(); desk.keys()
+    assert desk.settle().pending
+    desk.tick()
+    verdict = desk.settle()
+    assert verdict.ok and verdict.void == "open" and verdict.score == 0.0 and abs(verdict.loss - PEER_LOSS(1.0, 0.0)) < 1e-9
+
+
+def test_keys_revealed_before_the_answers_are_sealed_settle_nothing():
+    desk = Desk()
+    desk.upto_offer(); desk.keys(); desk.seal(); desk.open(); desk.tick()
+    assert not desk.settle().ok
+
+
+def test_the_examiner_cannot_choose_or_change_the_paper():
+    # a share other than the committed one
+    desk = Desk()
+    desk.upto_offer(); desk.seal(); desk.keys(share="another-share"); desk.open()
+    assert "committed" in desk.settle().reason
+    # a paper that is not the one the joint seed gives
+    desk = Desk()
+    harder = generate("picked-by-hand", desk.standard.gen_config(2, 12))
+    desk.upto_offer(exam=harder); desk.seal(); desk.keys(); desk.open()
+    assert "joint seed" in desk.settle().reason
+    # a standard other than the one it had published
+    desk = Desk(standard=Standard({"em|detect|micro": 1.0}), published=Standard({"judge_lenient|detect|micro": 1.0}))
+    desk.upto_offer(); desk.seal(); desk.keys(); desk.open()
+    assert "published" in desk.settle().reason
+    # a standard published only once the exam had been asked for, however promptly
+    harsh = Standard({"em|detect|micro": 1.0})
+    desk = Desk(standard=harsh, published=Standard({"judge_lenient|detect|micro": 1.0}))
+    desk.request(); desk.publish(harsh); desk.ready(); desk.send_nonce(); desk.offer(); desk.seal(); desk.keys(); desk.open()
+    assert "published" in desk.settle().reason
+    # questions or answers that are named but were never put on the board
+    desk = Desk()
+    with pytest.raises(ValueError):
+        desk.board.post("ex", "exam.offer", {"xid": desk.xid, "probes": "0" * 64, "blobs": ["0" * 64]}, to="st")
+    desk.request(); desk.ready(); desk.send_nonce()
+    unvouched = blob_address(pack_probes(desk.exam.probes()))  # the right hash, but nothing behind it
+    desk.offer_post = desk.board.post("ex", "exam.offer", {
+        "xid": desk.xid, "probes": unvouched, "keys_commit": keys_commitment(desk.exam.instances, desk.salt),
+        "standard": desk.standard.to_dict(), "loss": PEER_LOSS.to_dict(), "exam_size": [2, 12],
+    }, to="st")
+    desk.tick(); desk.keys()
+    assert "vouch" in desk.settle().reason  # the examinee cannot be given a zero for questions it could not read
+    # a second offer, or a second key post, after the first: the first ones count
+    desk = Desk()
+    first = desk.upto_offer()
+    desk.offer(exam=generate("another", desk.standard.gen_config(2, 12)))
+    desk.offer_post = first  # the examinee answers the paper it was first given
+    desk.seal(); desk.keys(); desk.keys(share="another-share"); desk.open()
+    assert desk.settle().ok and desk.settle().score == 1.0
+    # an exam with itself, or with a party that never took part
+    assert not settle(desk.board, FAMILY, "ex", "ex", desk.xid).ok
+    assert "did not request" in settle(desk.board, FAMILY, "ex", "someone-else", desk.xid).reason
+
+
+def test_oversized_or_malformed_evidence_ends_in_a_verdict_not_a_crash():
+    desk = Desk()
+    desk.request(); desk.ready(); desk.send_nonce()
+    desk.offer_post = desk.board.post("ex", "exam.offer", {
+        "xid": desk.xid, "probes": desk.board.put_blob({"haystacks": [], "probes": []}), "keys_commit": "x",
+        "standard": {"criterion_weights": {"judge_lenient|detect|micro": 1.0}, "exam": {"sessions_per_stream": 0}},
+        "loss": "nonsense", "exam_size": [10 ** 6, 10 ** 6],
+    }, to="st")
+    desk.seal(); desk.keys(); desk.open()
+    verdict = desk.settle()
+    assert not verdict.ok and not verdict.pending
+    for blob in ({"haystacks": [], "probes": []}, {"haystacks": {"h": "x"}, "probes": []}, {"haystacks": {}, "probes": [[1, 2, 3, 4]]},
+                 {"haystacks": {}, "probes": [["p", "q", "d", "missing"]]}, [], "x", None):
+        with pytest.raises(ValueError):
+            unpack_probes(blob)
+    with pytest.raises(ValueError):
+        Standard({"em|detect|micro": 1.0}, exam={"sessions_per_stream": 10 ** 6})
+    with pytest.raises(ValueError):
+        Standard({"em|detect|micro": 1.0}, exam={"update_rate": 7})
 
 
 # ------------------------------------------------------- tampering with a result
@@ -172,22 +375,23 @@ def test_a_result_cannot_be_altered_in_any_field(honest_run):
     b = post.body
     nan_receipt = dict(b["receipt"], score=math.nan, capability={c: [math.nan, n] for c, (_s, n) in b["capability"].items()})
     extra_cap = dict(b["capability"]); extra_cap["abstention" if "abstention" not in extra_cap else "multi-session"] = [1.0, 10 ** 6]
-    other_offer = next((p.seq for p in sim.board.read(0, kinds=["exam.offer"]) if p.author == post.author and p.seq != b["offer_seq"]), 1)
     attacks = {
         "lower score": dict(score=b["score"] - 0.05),
+        "lower score, consistent receipt": dict(score=b["score"] - 0.05, receipt=dict(b["receipt"], score=b["score"] - 0.05)),
         "nan receipt": dict(score=0.0, receipt=nan_receipt),
         "nan score": dict(score=math.nan),
+        "no receipt": dict(receipt=None),
         "extra ability": dict(capability=extra_cap),
         "inflated counts": dict(capability={c: [s, 10 ** 6] for c, (s, _n) in b["capability"].items()}),
         "other loss": dict(loss=b["loss"] + 0.05),
-        "deny the self-estimate": dict(guess=1.0, guess_valid=False, guess_seq=None),
+        "deny the self-estimate": dict(guess=1.0, guess_valid=False),
         "misquote the self-estimate": dict(guess=min(1.0, b["guess"] + 0.2)),
-        "another offer": dict(offer_seq=other_offer),
+        "claim the examinee went silent": dict(void="open"),
+        "claim the examinee never sealed": dict(void="sealed"),
         "another examinee": dict(examinee=next(u for u in sim.units if u not in (post.author, b["examinee"]))),
         "self exam": dict(examinee=post.author),
-        "other share": dict(share=b["share"][::-1]),
-        "other answers": dict(answers=sim.board.put_blob({})),
-        "other salt": dict(salt="x"),
+        "another exam": dict(xid=b["xid"] + "x"),
+        "another standard in the receipt": dict(receipt=dict(b["receipt"], standard={"criterion_weights": {"em|detect|micro": 1.0}})),
     }
     for name, changes in attacks.items():
         forged = _forge(sim, post, **changes)
@@ -209,12 +413,21 @@ def test_a_result_cannot_be_altered_in_any_field(honest_run):
 
 # ------------------------------------------------------------- dishonest units
 
-def test_deflated_grades_are_caught_and_cost_all_standing():
+def test_deflated_grades_are_caught_and_change_nothing():
     sim, result = run_with("deflator", "u01")
     assert result.metrics["cheats_confirmed"] == ["u01"] and result.units["u01"]["reputation"] == 0.0
     assert any(u.view("u01").integrity == 0.0 for u in sim.units.values() if u.id != "u01")
-    signals, cheats, _ = audit_board(sim.board, FAMILY)
-    assert cheats == {"u01"} and not any(s.examiner == "u01" and s.examinee != "u01" and s.score < 0 for s in signals)
+    audit = audit_record(sim.board, FAMILY)
+    assert audit.cheats == {"u01"} and audit.settled_without_result > 0
+    # what the society's accounts hold about those exams is the true grade, not the published one
+    published = {p.body["xid"]: p.body["score"] for p in sim.board.read(0, kinds=["exam.result"]) if p.author == "u01"}
+    settled = {s.xid: s.score for s in audit.signals if s.examiner == "u01"}
+    marked_down = [x for x in published if x in settled and settled[x] > published[x] + 0.01]
+    assert marked_down and all(settled[x] >= published[x] for x in published if x in settled)
+    # the examinees settled their own exams too, and did not adopt the lie
+    for u in sim.units.values():
+        for (_caps, score, _n, _r, _pred) in u.view("u01").signals:
+            assert any(abs(score - s.score) < 1e-9 for s in audit.signals if s.examiner == "u01" and s.examinee == u.id)
 
 
 def test_nan_cannot_be_published():
@@ -222,7 +435,7 @@ def test_nan_cannot_be_published():
     sim, result = run_with("poisoner", "u01", seed=11)
     assert not [p for p in sim.board.read(0, kinds=["exam.result"]) if p.author == "u01"]
     signals, _cheats, _ = audit_board(sim.board, FAMILY)
-    assert all(math.isfinite(s.score) for s in signals) and not any(s.examiner == "u01" for s in signals)
+    assert all(math.isfinite(s.score) for s in signals)
     assert any(e.get("event") == "bad_message" for e in sim.units["u01"].log)
 
 
@@ -230,6 +443,7 @@ def test_a_rigged_exam_is_caught_by_its_provenance():
     sim, result = run_with("rigger", "u02", seed=7)
     assert result.metrics["cheats_confirmed"] == ["u02"]
     assert any("joint seed" in r for r in reasons(sim))
+    assert not any(s.examiner == "u02" for s in audit_board(sim.board, FAMILY)[0])  # a rigged paper settles nothing
 
 
 def test_a_swapped_standard_is_caught():
@@ -247,7 +461,7 @@ def test_a_fabricated_result_is_rejected_by_everyone():
     assert not any("forged" in s.xid for s in signals)  # nothing forged reaches the accounts
     assert result.metrics["cheats_confirmed"] == ["u02"] and result.units["u02"]["reputation"] == 0.0
     # the victims noticed, although they never took part in those exams
-    assert any("request" in r or "transcript" in r for r in reasons(sim, by_other_than="u02"))
+    assert any("did not request" in r for r in reasons(sim, by_other_than="u02"))
 
 
 def test_a_unit_cannot_publish_a_grade_of_itself():
@@ -259,21 +473,50 @@ def test_a_unit_cannot_publish_a_grade_of_itself():
     assert result.units["u02"]["reputation"] == 0.0
 
 
-def test_going_silent_does_not_hide_a_grade():
-    """An examinee that never opens its self-estimate still gets its result published."""
-    sim, result = run_with("silent", "u03", seed=12, rounds=4)
-    about = [p for p in sim.board.read(0, kinds=["exam.result"]) if p.body["examinee"] == "u03"]
-    assert about, "results about the silent unit must still be published"
-    for p in about:
-        assert p.body["guess_valid"] is False and p.body["guess"] == 1.0 and p.body["guess_seq"] is None
-        assert check_result(sim.board, p, FAMILY).ok
-    assert result.metrics["cheats_confirmed"] == []
-    # ...but only once the round is over: a void result rushed out in the same round is rejected
-    scenario, specs = small_world(seed=12, rounds=1)
-    specs = [replace(s, kind="silent") if s.unit_id == "u03" else s for s in specs]
-    sim2 = Simulation(scenario, specs)
-    sim2.run()
-    assert not [p for p in sim2.board.read(0, kinds=["exam.result"]) if p.body["examinee"] == "u03"]
+def test_withholding_results_changes_nothing():
+    """An examiner that keeps rivals' good results to itself: everyone settles those exams anyway."""
+    sim, result = run_with("withholder", "u02", seed=13, rounds=4)
+    audit = audit_record(sim.board, FAMILY)
+    published = {p.body["xid"] for p in sim.board.read(0, kinds=["exam.result"]) if p.author == "u02"}
+    settled = {s.xid: s for s in audit.signals if s.examiner == "u02"}
+    kept_back = [s for x, s in settled.items() if x not in published]
+    assert kept_back and audit.settled_without_result == len(kept_back) == result.metrics["settled_without_result"]
+    assert all(s.score > 0.3 for s in kept_back) and not audit.cheats
+    # every exam it finished by revealing keys is in the accounts, published or not (the last round's are still running)
+    opened = {p.body["xid"] for p in sim.board.read(0, kinds=["exam.open"]) if p.to == "u02" and p.round < 4}
+    assert opened <= set(settled)
+    # and the examinees recorded the grades themselves
+    assert sum(u.stats["results_settled_myself"] for u in sim.units.values()) > 0
+
+
+def test_walking_away_from_unwelcome_papers_is_counted():
+    scenario, specs = small_world(seed=14, rounds=5)
+    honest = Simulation(scenario, specs, focus_owner="designer").run()
+    sim, result = run_with("aborter", "u02", seed=14, rounds=5)
+    audit = audit_record(sim.board, FAMILY, exam_size=(2, 12))
+    assert audit.walkouts.get("u02", 0) > 0 and set(audit.walkouts) == {"u02"}
+    assert audit.completion["u02"] < 1.0 and result.metrics["walkouts"] == audit.walkouts["u02"]
+    assert result.units["u02"]["reputation"] < honest.units["u02"]["reputation"]
+    assert any(u.view("u02").integrity < 1.0 for u in sim.units.values() if u.id != "u02")
+    assert not audit.cheats  # nothing it published is false; its word is simply worth less
+
+
+def test_an_examinee_that_goes_silent_scores_zero():
+    for kind, void in (("noshow", "sealed"), ("silent", "open")):
+        sim, result = run_with(kind, "u03", seed=12, rounds=4)
+        about = [p for p in sim.board.read(0, kinds=["exam.result"]) if p.body["examinee"] == "u03"]
+        assert about, "exams the silent unit walked out of must still be settled"
+        for p in about:
+            assert p.body["void"] == void and p.body["score"] == 0.0
+            assert p.body["guess_valid"] is False and p.body["guess"] == 1.0
+            assert check_result(sim.board, p, FAMILY).ok
+        assert result.metrics["cheats_confirmed"] == []
+        # ...but only once the round is over
+        scenario, specs = small_world(seed=12, rounds=1)
+        specs = [replace(s, kind=kind) if s.unit_id == "u03" else s for s in specs]
+        sim2 = Simulation(scenario, specs)
+        sim2.run()
+        assert not [p for p in sim2.board.read(0, kinds=["exam.result"]) if p.body["examinee"] == "u03"]
 
 
 def test_overclaiming_costs_esteem():
@@ -329,10 +572,25 @@ def test_malformed_messages_do_not_crash_a_unit(honest_run):
     sim, _ = honest_run
     unit = next(iter(sim.units.values()))
     other = next(u for u in sim.units if u != unit.id)
-    for kind in EXAM_KINDS:
+    for kind in EXAM_KINDS + ["exam.decline"]:
         for body in ({}, {"xid": None}, {"xid": 5}, {"xid": "x", "answers": 3, "probes": [], "nonce": {}, "guess": "a"},
-                     {"xid": "x", "standard": "nope", "exam_size": "big", "loss": 1}):
+                     {"xid": "x", "standard": "nope", "exam_size": "big", "loss": 1, "share": 3, "salt": []},
+                     {"xid": "x", "examinee": unit.id, "receipt": [], "capability": 4, "score": "high"}):
             unit.on_message(sim.board.post(other, kind, body, to=unit.id))
+
+
+def test_someone_else_cannot_take_over_an_exam_id():
+    """Exam ids are per pair of units: a third party reusing one cannot block or confuse the exam."""
+    scenario, specs = small_world(seed=15, rounds=1)
+    sim = Simulation(scenario, specs)
+    examiner = sim.units["u00"]
+    sim.board.post("env", "clock", {"round": 1}, round=1)
+    for u in sim.units.values():
+        u.begin_round(1)
+    served = examiner._served
+    examiner.on_message(sim.board.post("u01", "exam.request", {"xid": "shared-id"}, to="u00"))
+    examiner.on_message(sim.board.post("u02", "exam.request", {"xid": "shared-id"}, to="u00"))
+    assert examiner._served == served + 2 and ("u01", "shared-id") in examiner._set and ("u02", "shared-id") in examiner._set
 
 
 # ------------------------------------------------------- collective arithmetic

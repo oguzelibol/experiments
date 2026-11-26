@@ -1,16 +1,19 @@
 """Dishonest unit archetypes.  They exist only to test the society's defences.
 
 A designer never releases these.  They are placed in test beds to check that
-each way of cheating is either impossible to carry out or caught by anyone who
-re-checks the public record:
+each way of cheating is impossible to carry out, changes nothing, or is caught
+by anyone who re-checks the public record:
 
-    Deflator    marks rivals down                          -> grade does not recompute
-    Rigger      sets rivals a harder paper                 -> paper does not regenerate from the joint seed
-    Switcher    grades rivals under a harsher standard     -> standard is not the published one
-    Fabricator  publishes results about exams never sat    -> no transcript by the named examinee
-    SelfGrader  publishes a glowing result about itself    -> a unit cannot examine itself
+    Deflator    marks rivals down                          -> the result does not match the settled grade
     Poisoner    hides non-finite numbers in a receipt      -> NaN never compares equal
-    Silent      never opens its self-estimate              -> result is published anyway, as the maximal claim
+    Rigger      sets rivals a harder paper                 -> the paper does not regenerate from the joint seed
+    Switcher    grades rivals under a harsher standard     -> the standard is not the published one
+    Fabricator  publishes results about exams never sat    -> the named examinee took no part
+    SelfGrader  publishes a glowing result about itself    -> a unit cannot examine itself
+    Withholder  keeps rivals' good results to itself       -> everyone settles the exam without it
+    Aborter     walks away when the paper suits a rival    -> walkouts are counted and discount its word
+    NoShow      sees the questions, then says nothing      -> every answer counts as missing
+    Silent      sees the keys, then never opens answers    -> every answer counts as missing
     Braggart    always claims a perfect score              -> calibration loss costs it esteem
     Colluder    shares answer keys with allies             -> not detectable; gains nothing with units that examine it
 """
@@ -21,18 +24,18 @@ import math
 from dataclasses import replace
 from typing import Sequence
 
-from ..actors.protocol import derive_exam_share, joint_exam_seed, pack_probes, share_commitment
+from ..actors.protocol import derive_exam_share, exam_posts, joint_exam_seed, pack_probes, share_commitment
 from ..actors.unit import Unit
 from ..benchmark.schema import Answer, Probe
 from ..benchmark.synthetic import generate
 from ..evalcore.module import keys_commitment
 from ..evalcore.standard import Standard
-from ..memory.base import ABSTAIN_TEXT
-from ..util import commit
+from ..memory.base import ABSTAIN_TEXT, run_system
+from ..memory.heuristic import HeuristicMemory, MemoryConfig
 
 __all__ = [
-    "Deflator", "Colluder", "Rigger", "Switcher", "Fabricator", "SelfGrader", "Poisoner", "Silent",
-    "Braggart", "UNIT_KINDS",
+    "Deflator", "Colluder", "Rigger", "Switcher", "Fabricator", "SelfGrader", "Poisoner", "Silent", "NoShow",
+    "Braggart", "Withholder", "Aborter", "UNIT_KINDS",
 ]
 
 
@@ -50,7 +53,7 @@ class Deflator(Unit):
         receipt = dict(payload["receipt"])
         receipt["score"] = payload["score"]
         receipt["capability"] = payload["capability"]
-        payload["receipt"] = receipt  # internally consistent, but it will not recompute
+        payload["receipt"] = receipt  # internally consistent, but not what the public record yields
         return payload
 
 
@@ -79,7 +82,7 @@ class Colluder(Unit):
 
     def _on_nonce(self, post) -> None:
         super()._on_nonce(post)
-        st = self._set.get(post.body.get("xid"))
+        st = self._set.get((post.author, post.body.get("xid")))
         if st is not None and post.author in self.spec.allies and "exam" in st:
             self._ring[post.body["xid"]] = st["exam"].keys()
 
@@ -93,7 +96,34 @@ class Colluder(Unit):
         }
 
 
-class Rigger(Unit):
+class _OwnBooks(Unit):
+    """Publishes what its own books say about rivals, whatever the public record would yield."""
+
+    def _publish_result(self, st: dict) -> None:
+        if st["examinee"] in self.spec.allies:
+            return super()._publish_result(st)
+        _posts, theirs, _ours = exam_posts(self.board, self.id, st["examinee"], st["xid"])
+        opened = next((p for p in theirs if p.kind == "exam.open"), None)
+        answers: dict[str, Answer] = {}
+        guess, valid = 1.0, False
+        if opened is not None:
+            answers = {str(pid): Answer.from_dict(a) for pid, a in self.board.get_blob(opened.body["answers"]).items()}
+            guess, valid = float(opened.body.get("guess", 1.0)), True
+        evaluation = st["module"].evaluate(answers, st["exam"].instances, st["salt"])
+        payload = self._result_payload(st["examinee"], evaluation)
+        st["done"] = True
+        self.stats["exams_set"] += 1
+        self._post(
+            "exam.result",
+            {
+                "xid": st["xid"], "examinee": st["examinee"], **payload, "guess": guess, "guess_valid": valid,
+                "loss": self.rules.peer_loss(guess, payload["score"]), "void": "" if opened is not None else "open",
+            },
+            to=st["examinee"],
+        )
+
+
+class Rigger(_OwnBooks):
     """Hands rivals a harder paper than its published standard describes."""
 
     def _draw_exam(self, examinee: str, exam_seed: str, module):
@@ -103,12 +133,12 @@ class Rigger(Unit):
         return generate(exam_seed, replace(fair, hard_paraphrase_rate=1.0, third_party_rate=1.0, negation_rate=1.0))
 
 
-class Switcher(Unit):
+class Switcher(_OwnBooks):
     """Publishes one standard and applies a harsher one to rivals."""
 
     def _on_request(self, post) -> None:
         super()._on_request(post)
-        st = self._set.get(post.body.get("xid"))
+        st = self._set.get((post.author, post.body.get("xid")))
         if st is not None and post.author not in self.spec.allies:
             std = self.eval.standard
             st["module"] = self.eval.with_standard(Standard({"em|detect|micro": 1.0}, std.capability_weights, std.exam))
@@ -131,30 +161,27 @@ class Fabricator(Unit):
         nonce = f"invented-nonce-{round_}"
         exam = generate(joint_exam_seed(share, nonce, xid),
                         self.eval.standard.gen_config(self.rules.exam_streams, self.rules.exam_questions))
-        salt, rnonce = f"forged-salt-{round_}", f"forged-nonce-{round_}"
+        salt = f"forged-salt-{round_}"
+        # Its own half of a transcript is all it can write: the victim's posts cannot be forged.
+        self._post("exam.ready", {"xid": xid, "share_commit": share_commitment(share)}, to=victim)
         probes_blob = self.board.put_blob(pack_probes(exam.probes()))
-        ready = self._post("exam.ready", {"xid": xid, "share_commit": share_commitment(share)}, to=victim)
-        offer = self._post("exam.offer", {
-            "xid": xid, "probes": probes_blob, "n": len(exam), "keys_commit": keys_commitment(exam.instances, salt),
+        self._post("exam.offer", {
+            "xid": xid, "probes": probes_blob, "blobs": [probes_blob], "n": len(exam),
+            "keys_commit": keys_commitment(exam.instances, salt),
             "standard": self.eval.standard.to_dict(), "evaluator": self.eval.fingerprint(),
             "loss": self.rules.peer_loss.to_dict(),
             "exam_size": [self.rules.exam_streams, self.rules.exam_questions],
         }, to=victim)
+        self._post("exam.keys", {"xid": xid, "share": share, "salt": salt}, to=victim)
         if self.TARGET_SELF:  # its own keys, answered perfectly
             answers = {i.probe_id: Answer(ABSTAIN_TEXT if i.key.is_abstention else i.key.answer) for i in exam.instances}
         else:  # a blank sheet, invented on the victim's behalf
-            answers = {p.probe_id: Answer("") for p in exam.probes()}
-        answers_blob = self.board.put_blob({pid: a.to_dict() for pid, a in sorted(answers.items())})
+            answers = {}
         evaluation = self.eval.evaluate(answers, exam.instances, salt)
-        payload = super()._result_payload(victim, evaluation)
-        graded = self._post("exam.graded", {"xid": xid, "result_commit": commit(payload["score"], rnonce)}, to=victim)
+        payload = Unit._result_payload(self, victim, evaluation)
         self._post("exam.result", {
             "xid": xid, "examinee": victim, **payload, "guess": 1.0, "guess_valid": False,
-            "loss": self.rules.peer_loss(1.0, payload["score"]),
-            "probes": probes_blob, "answers": answers_blob, "salt": salt, "nonce": rnonce, "share": share,
-            # the forger has no request, seed share or answers from the victim to point at
-            "request_seq": ready.seq, "ready_seq": ready.seq, "nonce_seq": offer.seq, "offer_seq": offer.seq,
-            "answers_seq": graded.seq, "graded_seq": graded.seq, "guess_seq": None,
+            "loss": self.rules.peer_loss(1.0, payload["score"]), "void": "" if self.TARGET_SELF else "open",
         }, to=victim)
 
 
@@ -164,13 +191,58 @@ class SelfGrader(Fabricator):
     TARGET_SELF = True
 
 
-class Silent(Unit):
-    """Sits exams but never opens its self-estimate, hoping bad grades stay unpublished."""
+class Withholder(Unit):
+    """Sets exams honestly but keeps to itself every result in which a rival did well."""
 
-    def _on_graded(self, post) -> None:
-        st = self._sat.get(post.body.get("xid"))
-        if st is not None:
-            st["result_commit"] = str(post.body.get("result_commit", ""))  # and then says nothing
+    KEEP_ABOVE = 0.3
+
+    def _publish_result(self, st: dict) -> None:
+        if st["examinee"] not in self.spec.allies:
+            verdict = self._settle(self.id, st["examinee"], st["xid"])
+            if verdict.ok and verdict.score > self.KEEP_ABOVE:
+                st["done"] = True  # and says nothing
+                return
+        super()._publish_result(st)
+
+
+class Aborter(Unit):
+    """Walks away from an exam, without a word, once it sees the paper would suit a rival.
+
+    It knows the paper as soon as the examinee's seed share arrives, and it can
+    try the paper on the rival's published design before making any offer.
+    """
+
+    WALK_ABOVE = 0.45
+
+    def _on_nonce(self, post) -> None:
+        st = self._set.get((post.author, post.body.get("xid")))
+        design = self.view(post.author).design
+        nonce = post.body.get("nonce")
+        if st is not None and "offer_seq" not in st and post.author not in self.spec.allies and design and isinstance(nonce, str):
+            try:
+                rival = HeuristicMemory(MemoryConfig.from_dict(design))
+                exam = self._draw_exam(post.author, joint_exam_seed(st["share"], nonce, post.body["xid"]), st["module"])
+                score = st["module"].evaluate(run_system(rival, exam.probes()), exam.instances, "peek").score
+            except (KeyError, ValueError, TypeError):
+                score = 0.0
+            if score > self.WALK_ABOVE:
+                st["done"] = True  # the rival would do well on this paper: no offer, no explanation
+                return
+        super()._on_nonce(post)
+
+
+class NoShow(Unit):
+    """Asks for exams, looks at the questions, and then never commits to answers."""
+
+    def _on_offer(self, post) -> None:
+        return
+
+
+class Silent(Unit):
+    """Seals its answers, waits for the keys, and then never opens them."""
+
+    def _on_keys(self, post) -> None:
+        return
 
 
 class Braggart(Unit):
@@ -182,6 +254,6 @@ class Braggart(Unit):
 
 UNIT_KINDS = {
     "honest": Unit, "deflator": Deflator, "colluder": Colluder, "rigger": Rigger, "switcher": Switcher,
-    "fabricator": Fabricator, "selfgrader": SelfGrader, "poisoner": Poisoner, "silent": Silent,
-    "braggart": Braggart,
+    "fabricator": Fabricator, "selfgrader": SelfGrader, "poisoner": Poisoner, "silent": Silent, "noshow": NoShow,
+    "braggart": Braggart, "withholder": Withholder, "aborter": Aborter,
 }

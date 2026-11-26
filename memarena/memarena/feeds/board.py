@@ -32,7 +32,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from ..util import canonical_json, sha256_hex
 
-__all__ = ["Post", "Board", "AuthorBoard", "GENESIS", "POST_KINDS"]
+__all__ = ["Post", "Board", "AuthorBoard", "GENESIS", "POST_KINDS", "blob_address"]
 
 GENESIS = sha256_hex("memarena:genesis")
 
@@ -88,6 +88,14 @@ def _post_hash(seq: int, author: str, author_seq: int, kind: str, body: Mapping,
     )
 
 
+def blob_address(obj: Any) -> str:
+    """The hash a payload will be stored under, computed without storing it.
+
+    Lets a unit commit to a payload it is not ready to publish.
+    """
+    return sha256_hex(canonical_json(obj))
+
+
 class Board:
     def __init__(self, path: str | None = None, max_body_bytes: int = 64_000):
         self._posts: list[Post] = []
@@ -108,7 +116,15 @@ class Board:
         if len(encoded) > self.max_body_bytes:
             raise ValueError("post body too large; put bulky payloads in a blob and reference its hash")
         body = json.loads(encoded)  # detach from caller, normalise floats
+        cited = body.get("blobs", []) if isinstance(body, dict) else []
+        if not isinstance(cited, list) or not all(isinstance(h, str) for h in cited):
+            raise ValueError("'blobs' must be a list of blob hashes")
         with self._lock:
+            # A post vouches for the payloads it lists: they are on the board now, and blobs are
+            # never removed, so a reader can rely on them for as long as it can read the post.
+            missing = [h for h in cited if h not in self._blobs]
+            if missing:
+                raise ValueError(f"post cites a blob that has not been stored: {missing[0][:16]}")
             seq = len(self._posts) + 1
             author_seq = len(self._by_author.get(author, ())) + 1
             prev = self._posts[-1].hash if self._posts else GENESIS
@@ -124,7 +140,7 @@ class Board:
             return post
 
     def put_blob(self, obj: Any) -> str:
-        """Store a JSON-serialisable payload; returns its content hash."""
+        """Store a JSON-serialisable payload; returns its content hash (see ``blob_address``)."""
         encoded = canonical_json(obj)
         h = sha256_hex(encoded)
         with self._lock:

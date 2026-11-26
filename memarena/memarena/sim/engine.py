@@ -34,7 +34,7 @@ from ..memory.heuristic import FEATURES, MemoryConfig, observable_class
 from ..util import make_rng, sha256_hex
 from .adversaries import UNIT_KINDS, Colluder
 from .collective import (
-    CLASS_CAPABILITIES, audit_board, collective_estimate, gather_signals, reputation, select_champions,
+    CLASS_CAPABILITIES, audit_board, audit_record, collective_estimate, gather_signals, reputation, select_champions,
 )
 
 __all__ = [
@@ -302,8 +302,12 @@ class Simulation:
         """Champions, composite answers, the society's estimate and the outside outcome."""
         members = sorted(members if members is not None else self.units)
         # Every result is re-verified here; nothing unverified reaches the society's accounts.
-        signals, cheats, _bad = audit_board(self.board, self.family, self._verified)
+        rules = self.scenario.rules
+        audit = audit_record(self.board, self.family, self._verified, (rules.exam_streams, rules.exam_questions))
+        signals, cheats = audit.signals, audit.cheats
         rep = reputation(signals, sorted(self.units), banned=cheats, seeds=members)
+        # An examiner that walks away from exams once it knows the paper publishes a selected sample.
+        rep = {u: r * audit.completion.get(u, 1.0) ** 2 for u, r in rep.items()}
         champions = select_champions(signals, rep, members, self._current_since())
         probes = self.external.probes()
         class_counts: dict[str, int] = {}
@@ -339,6 +343,8 @@ class Simulation:
             "reputation": rep, "cheats": sorted(cheats), "n_signals": len(signals),
             "mean_peer_loss": sum(s.loss for s in signals) / len(signals) if signals else None,
             "results_posted": len(gather_signals(self.board)),
+            "settled_without_result": audit.settled_without_result,
+            "walkouts": dict(sorted(audit.walkouts.items())),
         }
 
     def result(self) -> SimResult:
@@ -389,6 +395,8 @@ class Simulation:
             "reputation_validity": rep_validity,
             "exchanges": coll["n_signals"],  # exams whose published result verifies
             "results_posted": coll["results_posted"],
+            "settled_without_result": coll["settled_without_result"],
+            "walkouts": sum(coll["walkouts"].values()),
             "mean_peer_loss": coll["mean_peer_loss"],
             "cheats_confirmed": coll["cheats"],
             "attention_to_dishonest": sum(attention_to_bad) / len(attention_to_bad) if attention_to_bad and bad_kinds else None,
