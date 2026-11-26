@@ -212,6 +212,7 @@ class Simulation:
             self.add_unit(spec)
         self._cursor = 0
         self._verified: dict[int, bool] = {}
+        self._outside_published: set[tuple[str, int]] = set()
         self._truth: dict[str, dict] = {}
         self.trace: list[dict] = []
         self.round = 0
@@ -347,6 +348,24 @@ class Simulation:
             "walkouts": dict(sorted(audit.walkouts.items())),
         }
 
+    def _publish_outside(self, by_owner: Mapping[str, Mapping]) -> None:
+        """The outside evaluator publishes its verdict on the shared board, once per owner and round.
+
+        Each owner's estimate is a function of the posts that precede this one
+        (the society's accounts are computed from the public record alone), so
+        the chain itself shows that the estimate was fixed before the outside
+        score was known.
+        """
+        round_ = len(self.trace)
+        for owner, info in by_owner.items():
+            if (owner, round_) in self._outside_published:
+                continue
+            self._outside_published.add((owner, round_))
+            self.board.post("env", "outside.score", {
+                "owner": owner, "estimate": info["estimate_report"], "score": info["outside_score"],
+                "loss": info["loss"], "value": info["value"],
+            }, round=round_)
+
     def result(self) -> SimResult:
         units = self.units
         focus = (
@@ -422,6 +441,7 @@ class Simulation:
                 "units": len(members), "value": c["value"], "outside_score": c["outside_score"],
                 "estimate_report": c["estimate_report"], "loss": c["loss"],
             }
+        self._publish_outside(by_owner)
         return SimResult(
             scenario=self.scenario.to_dict(), value=coll["value"], metrics=metrics, trace=self.trace,
             units=unit_info, by_owner=by_owner, board_head=self.board.head(),

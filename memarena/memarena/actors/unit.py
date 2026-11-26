@@ -875,6 +875,25 @@ class Unit:
             self.eval = self.eval.with_standard(new)
             self._profile_version = -1  # my self-belief is stated under my standard
 
+    def _rescore(self) -> None:
+        """Adopt the scoring belief my brain proposed, if it proposed a usable one.
+
+        Only the mixture over scoring recipes changes.  It is published with my
+        next profile and applies to exams requested after that.
+        """
+        weights = self._plan.get("scoring")
+        if not weights:
+            return
+        own = self.eval.standard
+        try:
+            new = Standard(weights, own.capability_weights, own.exam)
+        except ValueError:
+            return
+        if new.fingerprint() != own.fingerprint():
+            self.eval = self.eval.with_standard(new)
+            self._profile_version = -1  # my self-belief is stated under my standard
+            self.log.append({"round": self.round, "event": "rescore", "criteria": dict(new.criterion_weights)})
+
     # ------------------------------------------------------------ round hooks
     def begin_round(self, round_: int) -> None:
         self.round = round_
@@ -922,6 +941,7 @@ class Unit:
             self._plan = self._ask_brain()
         self._strive()
         self._conform()
+        self._rescore()
         self._plan = {k: v for k, v in self._plan.items() if k == "sit_with"}
 
     # ------------------------------------------------------------------ brain
@@ -960,6 +980,15 @@ class Unit:
             out["candidates"] = [c for c in plan["candidates"] if isinstance(c, Mapping)][:4]
         if isinstance(plan.get("sit_with"), list):
             out["sit_with"] = [p for p in plan["sit_with"] if isinstance(p, str)][: self.policy.exams_per_round]
+        if isinstance(plan.get("scoring"), list):
+            weights: dict[str, float] = {}
+            for entry in plan["scoring"][:6]:
+                cid, w = (entry.get("criterion"), entry.get("weight")) if isinstance(entry, Mapping) else (None, None)
+                if (cid in self.eval.family.ids and isinstance(w, (int, float)) and not isinstance(w, bool)
+                        and math.isfinite(float(w)) and w > 0):
+                    weights[cid] = weights.get(cid, 0.0) + float(w)
+            if weights:
+                out["scoring"] = weights
         note = plan.get("note")
         if isinstance(note, str) and note.strip():
             self._post("note", {"text": note.strip()[:600]})

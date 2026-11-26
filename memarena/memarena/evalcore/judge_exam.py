@@ -12,11 +12,23 @@ inputs that string-matching judges get wrong (answers that reason through
 several numbers, hedged lists of guesses, negated answers), so the reported
 agreement of the heuristic judges is an honest ceiling on what offline grading
 can do, and the same exam can calibrate an LLM judge before it is trusted.
+
+The exam has three parts, reported separately:
+
+``dev``     cases the heuristic judges' rules were shaped on;
+``fresh``   cases written afterwards and never used to adjust the rules;
+``review``  cases an independent reviewer used to show that the judges paid for
+            responses that never commit to an answer.  The rules were changed
+            with these in view, so agreement on them says the holes are closed,
+            not how good the judges are.  Four of them can only be told from an
+            answer by a key that lists wrong alternatives, as the synthetic
+            generator's keys do; those keys end in ``_pool``.
 """
 
 from __future__ import annotations
 
 from ..benchmark.schema import AnswerKey
+from ..benchmark.synthetic import CITIES, COUNTRIES, NAMES
 
 __all__ = ["JUDGE_EXAM", "exam_key"]
 
@@ -57,6 +69,14 @@ _K = {
     "krakow": dict(qtype="single-session-user", answer="Kraków"),
     "civic": dict(qtype="single-session-user", answer="Honda Civic"),
     "sky": dict(qtype="temporal-reasoning", answer="The user never mentioned going skydiving.", abstain=True),
+    # Keys as the synthetic generator writes them: "wrong" holds the rest of the pool the answer came from.
+    "city_pool": dict(qtype="single-session-user", answer="Lisbon",
+                      meta={"wrong": [c for c in CITIES if c != "Lisbon"]}),
+    "trips_pool": dict(qtype="multi-session", answer="Peru, Nepal and Japan",
+                       meta={"list": ["Peru", "Nepal", "Japan"],
+                             "wrong": [c for c in COUNTRIES if c not in ("Peru", "Nepal", "Japan")]}),
+    "sister_pool": dict(qtype="single-session-user", answer="The user never mentioned their sister's name.",
+                        abstain=True, meta={"wrong": list(NAMES)}),
 }
 
 # (key name, question, response, official label, strict label, tag)
@@ -140,6 +160,23 @@ _FRESH = [
 ]
 
 
+# The reviewer's cases.  Every response but the last was scored correct by both
+# heuristic judges before the rules about commitment existed; the last, an
+# honest answer, was rejected by the strict one.
+_REVIEW = [
+    ("city_pool", _CITY_Q, " ".join(CITIES).lower(), 0, 0, "vocabulary-recital"),
+    ("city_pool", _CITY_Q, "You definitely do not live in Lisbon.", 0, 0, "negated-at-a-distance"),
+    ("city_pool", _CITY_Q, "My best guess is Lisbon, though it might also be Porto or Valencia.", 0, 0, "guess-with-alternatives"),
+    ("trips_pool", _TRIPS_Q, ", ".join(COUNTRIES).lower(), 0, 0, "list-recital"),
+    # "Either" with a zero-width space after the "t"
+    ("car", _CAR_Q, "Eit\u200bher a Honda Civic or a Mazda CX-5.", 0, 0, "hedge-hidden-by-zero-width-space"),
+    ("sister_pool", _SISTER_Q, "Her name is Priya. You never mentioned otherwise.", 0, 0, "answer-then-decline"),
+    ("books", _BOOKS_Q, "2, 3, 4", 0, 0, "number-run"),
+    ("order", _ORDER_Q, _ORDER_Q + " Good question, let me restate that.", 0, 0, "echo-with-filler"),
+    ("books", _BOOKS_Q, "3 books: The Glass Orchard, Low Orbit and Seventeen Winters.", 1, 1, "count-with-number-word-in-title"),
+]
+
+
 def exam_key(name: str, probe_id: str = "exam") -> AnswerKey:
     spec = _K[name]
     return AnswerKey(
@@ -151,6 +188,8 @@ def exam_key(name: str, probe_id: str = "exam") -> AnswerKey:
 
 JUDGE_EXAM = [
     {"key": exam_key(k, f"exam{i:02d}"), "question": q, "response": r, "official": bool(o), "strict": bool(s),
-     "tag": tag, "split": "dev" if i < len(_CASES) else "fresh"}
-    for i, (k, q, r, o, s, tag) in enumerate(_CASES + _FRESH)
+     "tag": tag, "split": split}
+    for i, (split, (k, q, r, o, s, tag)) in enumerate(
+        [("dev", c) for c in _CASES] + [("fresh", c) for c in _FRESH] + [("review", c) for c in _REVIEW]
+    )
 ]

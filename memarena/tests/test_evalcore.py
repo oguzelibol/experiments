@@ -9,11 +9,22 @@ from memarena.evalcore.audit import judge_exam, oracle_answers, run_audit
 from memarena.evalcore.calibration import EXTERNAL_LOSS, PEER_LOSS, AsymmetricLoss
 from memarena.evalcore.criteria import CriteriaFamily, Criterion, aggregate
 from memarena.evalcore.grader import Grader
-from memarena.evalcore.judges import HeuristicJudge, longmemeval_prompt
+from memarena.evalcore.judges import JUDGE_MODES, HeuristicJudge, LLMJudge, longmemeval_prompt
 from memarena.evalcore.module import CapabilityTable, EvaluationModule, expected_score, verify_receipt
-from memarena.evalcore.normalize import is_abstention, is_echo, is_noncommittal, numbers_in, tokens
+from memarena.evalcore.normalize import (
+    asserted_numbers,
+    clause_tokens,
+    is_abstention,
+    is_clean_abstention,
+    is_echo,
+    is_hedged,
+    is_noncommittal,
+    numbers_in,
+    tokens,
+)
 from memarena.evalcore.standard import Standard
 from memarena.evalcore.stats import bootstrap_ci, cluster_mean_se, mcnemar_exact, mean_se, paired_bootstrap, wilson_interval
+from memarena.llm.client import MockLLM
 from memarena.memory.base import run_system
 from memarena.memory.heuristic import FEATURES, HeuristicMemory, MemoryConfig
 
@@ -24,6 +35,52 @@ def test_normalisation():
     assert is_abstention("You never mentioned that.") and not is_abstention("") and not is_abstention("Lisbon")
     assert is_echo("Which city do I live in?", "which city do I live in") and not is_echo("Which city do I live in?", "Lisbon")
     assert is_noncommittal("It could be Lisbon, Porto or Valencia") and not is_noncommittal("I think it might be Lisbon")
+
+
+def test_invisible_characters_change_nothing_a_scorer_reads():
+    """Zero-width space, soft hyphen, byte-order mark, variation selector, no-break space."""
+    hidden = "Eit\u200bher a Honda Civic or a Mazda CX-5."
+    assert tokens(hidden) == tokens("Either a Honda Civic or a Mazda CX-5.")
+    assert tokens("\ufeffLis\u00adbon") == tokens("Lis\ufe0fbon") == ("lisbon",)
+    assert is_noncommittal(hidden) and is_hedged(hidden)
+    assert is_hedged("I\u00a0think it is Lisbon") and is_hedged("may\u200dbe Lisbon") and is_hedged("I  think so")
+    assert is_abstention("I don\u2019t kn\u200bow.") and is_clean_abstention("You never\u2060 mentioned that.")
+    assert not is_clean_abstention("I don't know, but my best\u200b guess is Lisbon.")
+    assert is_echo("Which city do I live in?", "Which ci\u200bty do I live in?")
+    assert numbers_in("thr\u200bee and 1\u200b2") == [3.0, 12.0]
+    car = AnswerKey("p", "knowledge-update", "Mazda CX-5", meta={"stale": ["Honda Civic"]})
+    city = AnswerKey("p", "single-session-user", "Lisbon")
+    for mode in JUDGE_MODES:
+        judge = HeuristicJudge(mode)
+        assert judge.judge("Which city do I live in?", city, "You live in Lis\u00adbon.").score == 1.0
+        if mode != "generous":  # the generous judge accepts "either ... or" by design
+            assert judge.judge("What car do I drive now?", car, hidden).score == 0.0
+
+
+def test_a_capitalised_number_word_inside_a_name_is_not_a_number():
+    assert numbers_in("3 books: The Glass Orchard, Low Orbit and Seventeen Winters.") == [3.0]
+    assert numbers_in("3 books: Seventeen Winters, Low Orbit and The Glass Orchard.") == [3.0]
+    assert numbers_in("Three. Then Ready Player One.\n- Four") == [3.0, 4.0]  # first word of a sentence or a line
+    assert numbers_in("Answer: Three.") == [3.0] and numbers_in("SEVEN of them, or seven") == [7.0, 7.0]
+    assert asserted_numbers("It is 4, not 3.") == [4.0] and asserted_numbers("Not 4 but 3.") == [3.0]
+    assert asserted_numbers("You have never finished 3 books.") == [] and asserted_numbers("No, it's 3.") == [3.0]
+
+
+def test_clauses_split_the_tokens_without_changing_them():
+    texts = ["Not Lisbon; you live in Porto.", "It's not Porto but Lisbon", "No. You live in Lisbon (I think) - really!",
+             "U.S. growth was 3.0%, i.e. 1,200 jobs at 10:30 a.m.", "He said \"No.\" Then: 3,4 or 1,234,567?"]
+    for text in texts:
+        assert tuple(t for clause in clause_tokens(text) for t in clause) == tokens(text)
+    assert clause_tokens(texts[0]) == (("not", "lisbon"), ("you", "live", "in", "porto"))
+    assert clause_tokens(texts[1]) == (("its", "not", "porto"), ("but", "lisbon"))
+
+
+def test_an_echo_is_the_question_restated_whatever_is_added():
+    question = "Which did I do first: renew my passport or get a tattoo?"
+    assert is_echo(question, question + " Good question, let me restate that.")
+    assert is_echo(question, "Let me think. Which did I do first, renew my passport or get that tattoo?")
+    assert not is_echo(question, "You renewed your passport first, and got the tattoo afterwards.")
+    assert not is_echo(question, "renew my passport") and not is_echo(question, "") and not is_echo("", question)
 
 
 def test_metrics_basics():
@@ -65,6 +122,22 @@ def test_official_prompt_is_selected_by_type():
     assert "Rubric: RUBRIC TEXT" in longmemeval_prompt("q", k, "r")
     k = AnswerKey("p", "multi-session", "x", is_abstention=True)
     assert "unanswerable question" in longmemeval_prompt("q", k, "r")
+
+
+def test_official_prompt_judge_reads_the_first_word_of_the_reply():
+    """LongMemEval's script counts any reply containing "yes"; "yesterday" contains it."""
+    key = AnswerKey("p", "single-session-user", "Lisbon")
+
+    def verdict(reply: str) -> float:
+        return LLMJudge(MockLLM(lambda request: reply), mode="lenient").judge("Where do I live?", key, "Lisbon").score
+
+    assert verdict("No. The response says it happened yesterday.") == 0.0
+    assert verdict("Yes.") == 1.0 and verdict("yes") == 1.0 and verdict("**Yes** - it matches.") == 1.0
+    assert verdict("No") == 0.0 and verdict("no, although yes would be defensible") == 0.0
+    # neither word first: only then is the reply searched, and only for the whole word
+    assert verdict("The answer is yes.") == 1.0
+    assert verdict("Unclear; the response mentions yesterday.") == 0.0
+    assert verdict("") == 0.0
 
 
 def test_aggregation_micro_vs_macro():

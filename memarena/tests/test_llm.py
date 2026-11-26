@@ -86,11 +86,13 @@ def test_cache_makes_verdicts_reproducible(tmp_path):
 
 def test_brain_returns_plan_and_degrades_safely():
     plan = {"candidates": [{"features": ["temporal"], "top_k": 6, "abstain_threshold": 0.3, "latest_margin": 0.6, "style": "terse"}],
-            "sit_with": ["u01"], "note": "temporal experts should add relative-date handling"}
+            "sit_with": ["u01"], "scoring": [{"criterion": "judge_strict|detect|micro", "weight": 1.0}],
+            "note": "temporal experts should add relative-date handling"}
     brain = LLMBrain(MockLLM(lambda r: plan))
     assert brain.decide({"unit": "u00"}) == plan
     assert LLMBrain(MockLLM(lambda r: LLMResult(text="", status="refused"))).decide({}) == {}
-    assert set(BRAIN_SCHEMA["required"]) == {"candidates", "sit_with", "note"}
+    assert set(BRAIN_SCHEMA["required"]) == {"candidates", "sit_with", "scoring", "note"}
+    assert "judge_strict|detect|micro" in BRAIN_SCHEMA["properties"]["scoring"]["items"]["properties"]["criterion"]["enum"]
 
 
 def test_anthropic_client_request_shape():

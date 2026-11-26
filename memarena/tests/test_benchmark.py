@@ -1,6 +1,8 @@
 import dataclasses
 import json
 
+import pytest
+
 from memarena.benchmark.adapters import load_locomo, load_longmemeval
 from memarena.benchmark.schema import QUESTION_TYPES, Probe, parse_date
 from memarena.benchmark.synthetic import GenConfig, generate
@@ -189,3 +191,56 @@ def test_longmemeval_histories_are_identified_by_content_and_overlaps_are_cluste
         parts = bench.split({"dev": 0.5, "test": 0.5}, seed=seed)
         text = {n: {t.content for i in part for s_ in i.probe.sessions for t in s_.turns} for n, part in parts.items()}
         assert not (text["dev"] & text["test"])
+
+
+# ------------------------------------------------- an exam holds what its standard names
+
+def test_a_focused_exam_contains_only_the_named_abilities_and_exactly_the_asked_number_of_questions():
+    from memarena.evalcore.standard import Standard, capability_of
+
+    cw = {"judge_lenient|detect|micro": 1.0}
+    for focus in ({"single-session-preference": 1.0}, {"knowledge-update": 1.0}, {"multi-session": 0.5, "abstention": 0.5},
+                  {"single-session-preference": 1, "single-session-assistant": 1, "knowledge-update": 1}, {"abstention": 1.0}):
+        std = Standard(cw, focus)
+        for k in range(12):
+            exam = generate(f"focus-{k}", std.gen_config(2, 12))
+            assert len(exam) == 24
+            assert all(capability_of(i.key) in std.capability_weights for i in exam), focus
+            assert 2 <= exam.info["histories"] <= 16
+            assert max(sum(1 for i in exam if i.probe.haystack_id == h) for h in {i.probe.haystack_id for i in exam}) <= 12
+
+
+def test_position_in_a_history_says_nothing_about_whether_a_question_is_answerable():
+    from memarena.evalcore.standard import Standard
+
+    std = Standard({"judge_lenient|detect|micro": 1.0}, {"abstention": 0.5, "temporal-reasoning": 0.5})
+    hits, seen = [0] * 12, [0] * 12
+    for k in range(150):
+        exam = generate(f"position-{k}", std.gen_config(2, 12))
+        order, at = [], {}
+        for i in exam:
+            if i.probe.haystack_id not in at:
+                at[i.probe.haystack_id] = 0
+                order.append(i.probe.haystack_id)
+            if order.index(i.probe.haystack_id) < 2:  # the two histories that were asked for
+                j = at[i.probe.haystack_id]
+                seen[j] += 1
+                hits[j] += i.key.is_abstention
+            at[i.probe.haystack_id] += 1
+    rates = [h / n for h, n in zip(hits, seen)]
+    assert max(rates) - min(rates) < 0.15, rates
+
+
+def test_generator_refuses_what_it_cannot_honour_and_never_reuses_an_id_for_other_content():
+    for bad in (dict(sessions_per_stream=3), dict(type_mix={}), dict(type_mix={"made-up": 1.0}), dict(update_rate=2.0),
+                dict(n_streams=0), dict(exchanges_per_session=(4, 2)), dict(abstention_rate=float("nan")),
+                dict(type_mix={"knowledge-update": 1.0}, update_rate=0.0)):  # no updates, so nothing to ask about them
+        with pytest.raises(ValueError):
+            generate("refused", GenConfig(**bad))
+    a = generate("same-seed", GenConfig(n_streams=4))
+    b = generate("same-seed", GenConfig(n_streams=4, third_party_rate=1.0))
+    assert not {i.probe_id for i in a} & {i.probe_id for i in b}
+    assert not {i.probe.haystack_id for i in a} & {i.probe.haystack_id for i in b}
+    # a configuration restored from its stored form draws the same benchmark, whatever order its keys come back in
+    restored = GenConfig.from_dict(json.loads(json.dumps(a.info["config"], sort_keys=True)))
+    assert generate("same-seed", restored).manifest_hash() == a.manifest_hash()

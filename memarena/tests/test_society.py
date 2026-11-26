@@ -9,8 +9,8 @@ import pytest
 
 from memarena.actors.brain import LLMBrain
 from memarena.actors.protocol import (
-    check_result, derive_exam_share, exam_posts, joint_exam_seed, pack_probes, settle, share_commitment, unpack_probes,
-    verify_result,
+    called_off, check_result, derive_exam_share, exam_posts, joint_exam_seed, pack_probes, settle, share_commitment,
+    unpack_probes, verify_result,
 )
 from memarena.actors.unit import Unit, UnitPolicy, clamp_config, mutate_config
 from memarena.benchmark.schema import Answer
@@ -332,6 +332,35 @@ def test_the_examiner_cannot_choose_or_change_the_paper():
     assert "did not request" in settle(desk.board, FAMILY, "ex", "someone-else", desk.xid).reason
 
 
+def test_an_exam_can_be_called_off_only_when_no_paper_can_be_drawn():
+    size = (2, 12)
+    # a standard that asks only about updated facts while saying facts are never updated: no paper exists
+    impossible = Standard({"judge_lenient|detect|micro": 1.0}, {"knowledge-update": 1.0}, {"update_rate": 0.0})
+    board = Board()
+    board.post("env", "clock", {"round": 1}, round=1)
+    board.post("ex", "profile", {"standard": impossible.to_dict()})
+    share = derive_exam_share("secret", "ex", 1)
+    board.post("st", "exam.request", {"xid": "st>ex#1"}, to="ex")
+    board.post("ex", "exam.ready", {"xid": "st>ex#1", "share_commit": share_commitment(share)}, to="st")
+    board.post("st", "exam.nonce", {"xid": "st>ex#1", "nonce": "n"}, to="ex")
+    assert not called_off(board, "ex", "st", "st>ex#1", size)  # nothing shown yet
+    board.post("ex", "exam.decline", {"xid": "st>ex#1", "share": "not-the-committed-share"}, to="st")
+    assert not called_off(board, "ex", "st", "st>ex#1", size)
+    board.post("ex", "exam.decline", {"xid": "st>ex#1", "share": share}, to="st")
+    assert called_off(board, "ex", "st", "st>ex#1", size)
+    board.post("env", "clock", {"round": 2}, round=2)
+    board.post("env", "clock", {"round": 3}, round=3)
+    assert audit_record(board, FAMILY, exam_size=size).walkouts == {}
+    assert audit_record(board, FAMILY).walkouts == {"ex": 1}  # without the exam size the claim cannot be checked
+    # the same claim about a seed that does expand is false, and the walkout stands
+    desk = Desk()
+    desk.request(); desk.ready(); desk.send_nonce()
+    desk.board.post("ex", "exam.decline", {"xid": desk.xid, "share": desk.share}, to="st")
+    desk.tick(); desk.tick()
+    assert not called_off(desk.board, "ex", "st", desk.xid, size)
+    assert audit_record(desk.board, FAMILY, exam_size=size).walkouts == {"ex": 1}
+
+
 def test_oversized_or_malformed_evidence_ends_in_a_verdict_not_a_crash():
     desk = Desk()
     desk.request(); desk.ready(); desk.send_nonce()
@@ -414,20 +443,20 @@ def test_a_result_cannot_be_altered_in_any_field(honest_run):
 # ------------------------------------------------------------- dishonest units
 
 def test_deflated_grades_are_caught_and_change_nothing():
-    sim, result = run_with("deflator", "u01")
-    assert result.metrics["cheats_confirmed"] == ["u01"] and result.units["u01"]["reputation"] == 0.0
-    assert any(u.view("u01").integrity == 0.0 for u in sim.units.values() if u.id != "u01")
+    sim, result = run_with("deflator", "u03")  # a unit whose examinees score well above zero, so there is something to take
+    assert result.metrics["cheats_confirmed"] == ["u03"] and result.units["u03"]["reputation"] == 0.0
+    assert any(u.view("u03").integrity == 0.0 for u in sim.units.values() if u.id != "u03")
     audit = audit_record(sim.board, FAMILY)
-    assert audit.cheats == {"u01"} and audit.settled_without_result > 0
+    assert audit.cheats == {"u03"} and audit.settled_without_result > 0
     # what the society's accounts hold about those exams is the true grade, not the published one
-    published = {p.body["xid"]: p.body["score"] for p in sim.board.read(0, kinds=["exam.result"]) if p.author == "u01"}
-    settled = {s.xid: s.score for s in audit.signals if s.examiner == "u01"}
+    published = {p.body["xid"]: p.body["score"] for p in sim.board.read(0, kinds=["exam.result"]) if p.author == "u03"}
+    settled = {s.xid: s.score for s in audit.signals if s.examiner == "u03"}
     marked_down = [x for x in published if x in settled and settled[x] > published[x] + 0.01]
     assert marked_down and all(settled[x] >= published[x] for x in published if x in settled)
     # the examinees settled their own exams too, and did not adopt the lie
     for u in sim.units.values():
-        for (_caps, score, _n, _r, _pred) in u.view("u01").signals:
-            assert any(abs(score - s.score) < 1e-9 for s in audit.signals if s.examiner == "u01" and s.examinee == u.id)
+        for (_caps, score, _n, _r, _pred) in u.view("u03").signals:
+            assert any(abs(score - s.score) < 1e-9 for s in audit.signals if s.examiner == "u03" and s.examinee == u.id)
 
 
 def test_nan_cannot_be_published():
@@ -539,9 +568,15 @@ def test_collusion_cannot_raise_first_hand_esteem():
     sim = Simulation(scenario, specs, focus_owner="designer")
     sim.run()
     seen = [s for u in sim.units.values() if u.id not in ring for r in ring for (s, _n, _l, _r) in u.view(r).first_hand]
-    assert seen and all(score < 0.999 for score in seen)  # nobody outside the ring saw a leaked key
-    mutual = [sim.units[a].view(b).esteem for a in ring for b in ring if a != b and sim.units[a].view(b).first_hand]
-    assert mutual and max(mutual) > 0.6  # inside the ring, esteem is inflated
+    inside = [s for a in ring for b in ring if a != b for (s, _n, _l, _r) in sim.units[a].view(b).first_hand]
+    assert inside and all(score > 0.999 for score in inside)  # with the keys in hand, every exam inside the ring is aced
+    # units outside the ring measure the members as they are: the leaked keys are of no use on their exams
+    truth = {r: sim.truth(sim.units[r])["score"] for r in ring}
+    assert seen and sum(seen) / len(seen) < 0.9 and max(truth.values()) < 0.9
+    # and in the honest owner's accounts, which start from its own units, a ring member's standing is
+    # what honest examiners measured, not what the ring says of itself
+    honest_only = [s for s in audit_board(sim.board, FAMILY)[0] if s.examiner not in ring and s.examinee in ring]
+    assert honest_only and max(s.score for s in honest_only) < 1.0 or sum(s.score for s in honest_only) / len(honest_only) < 0.9
 
 
 # ------------------------------------------------------------ accusations
@@ -656,7 +691,7 @@ def test_brain_can_steer_but_not_bypass_validation():
         plans.append(1)
         return {"candidates": [{"features": list(FEATURES), "top_k": 500, "abstain_threshold": 0.3,
                                 "latest_margin": 0.6, "style": "terse"}],
-                "sit_with": ["nobody", "u01"], "note": "x" * 2000}
+                "sit_with": ["nobody", "u01"], "scoring": [], "note": "x" * 2000}
 
     scenario, specs = small_world(seed=5, rounds=3, n=4)
     sim = Simulation(scenario, specs, brain_factory=lambda spec: LLMBrain(MockLLM(responder)))
@@ -666,6 +701,26 @@ def test_brain_can_steer_but_not_bypass_validation():
         assert len(u.memory_cfg.features) <= scenario.rules.feature_budget and u.memory_cfg.top_k <= 14
     notes = sim.board.read(0, kinds=["note"])
     assert notes and all(len(p.body["text"]) <= 600 for p in notes)
+
+
+def test_brain_can_change_what_the_unit_believes_good_scoring_is_and_nobody_is_convicted_for_it():
+    def responder(req):
+        return {"candidates": [], "sit_with": [], "note": "",
+                "scoring": [{"criterion": "judge_strict|detect|macro", "weight": 3}, {"criterion": "f1|detect|micro", "weight": 1},
+                            {"criterion": "made-up-recipe", "weight": 5}, {"criterion": "em|detect|micro", "weight": -2},
+                            {"criterion": "em|detect|micro", "weight": float("nan")}, "nonsense"]}
+
+    scenario, specs = small_world(seed=16, rounds=4, n=4)
+    before = {s.unit_id: dict(Standard(s.criterion_weights).criterion_weights) for s in specs}
+    sim = Simulation(scenario, specs, brain_factory=lambda spec: LLMBrain(MockLLM(responder)) if spec.unit_id == "u01" else None)
+    result = sim.run()
+    assert dict(sim.units["u01"].eval.standard.criterion_weights) == {"f1|detect|micro": 0.25, "judge_strict|detect|macro": 0.75}
+    assert all(dict(u.eval.standard.criterion_weights) == before[u.id] for u in sim.units.values() if u.id != "u01")
+    # exams asked for before the change were finished under the old standard, later ones under the new: all verify
+    used = {canonical_json(p.body["receipt"]["standard"]["criterion_weights"])
+            for p in sim.board.read(0, kinds=["exam.result"]) if p.author == "u01"}
+    assert len(used) == 2
+    assert result.metrics["cheats_confirmed"] == [] and result.metrics["audit_fails"] == 0 and result.metrics["walkouts"] == 0
 
 
 def test_units_run_unchanged_over_http():

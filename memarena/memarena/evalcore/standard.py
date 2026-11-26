@@ -151,5 +151,5 @@ class Standard:
             kwargs["sessions_per_stream"] = int(kwargs["sessions_per_stream"])
         return GenConfig(
             n_streams=n_streams, questions_per_stream=questions_per_stream,
-            type_mix=type_mix, abstention_rate=min(0.9, abst), **kwargs,
+            type_mix=type_mix, abstention_rate=min(1.0, abst), **kwargs,
         )

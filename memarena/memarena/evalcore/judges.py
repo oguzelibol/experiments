@@ -3,21 +3,29 @@
 Two implementations share one interface, each available in four leniency
 modes that correspond to judging styles actually used on memory benchmarks:
 
-``lenient``   LongMemEval's official rule: correct if the response contains the
+``lenient``   LongMemEval's official rule: correct if the response gives the
               answer; partial lists fail; temporal counts may be off by one;
-              old + updated information is fine.
-``strict``    Additionally rejects hedging, conflicting candidates, superseded
-              values and padded answers.
+              old + updated information is fine when the update comes last.
+``strict``    Additionally rejects hedging, superseded values given as the last
+              word, any extra list item and numbers that are not exact.
 ``generous``  The "J score" style used by several vendors on LoCoMo: correct if
               the response touches the right content (one correct list item,
               a near-miss number, half of the answer's words).
 ``graded``    Partial credit in [0, 1], in the style of rubric-nugget scoring.
 
+``lenient`` and ``strict`` are the modes scores are reported under.  Both ask
+one thing of a response before anything else: that it *commits* to an answer.
+A response that recites candidates, negates the answer, restates the question
+or declines and then lists values has not answered, however often the right
+string occurs in it.  ``generous`` and ``graded`` model laxer evaluators and
+are kept lax on purpose.
+
 ``HeuristicJudge`` is deterministic and free: the offline stand-in.
 ``LLMJudge`` calls a language model.  Its ``lenient`` mode uses LongMemEval's
 official per-question-type prompts verbatim so numbers are comparable with
-published results; the other modes use prompts written for this project that
-treat the response as untrusted data and return structured output.
+published results (the yes/no reply is read by its first word, not by a search
+for "yes"); the other modes use prompts written for this project that treat the
+response as untrusted data and return structured output.
 
 A judge only ever sees (question, key, response).  It never learns who produced
 the response, which is what makes self- and peer-evaluation identical by
@@ -29,12 +37,25 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Mapping, Protocol
+from functools import lru_cache
+from typing import Any, Iterable, Mapping, Protocol, Sequence
 
 from ..benchmark.schema import AnswerKey
 from ..util import hash_obj
 from . import metrics
-from .normalize import is_abstention, is_clean_abstention, is_echo, is_hedged, is_noncommittal, numbers_in, tokens
+from .normalize import (
+    asserted_numbers,
+    clause_tokens,
+    clean,
+    is_abstention,
+    is_clean_abstention,
+    is_echo,
+    is_hedged,
+    is_noncommittal,
+    negated,
+    numbers_in,
+    tokens,
+)
 
 __all__ = [
     "JUDGE_MODES",
@@ -46,6 +67,8 @@ __all__ = [
 ]
 
 JUDGE_MODES = ("lenient", "strict", "generous", "graded")
+# The two modes scores are reported under; they share the rules about commitment.
+_REPORTING_MODES = ("lenient", "strict")
 
 # Longest response (in normalised tokens) a heuristic judge will read as an
 # answer.  Measured on LongMemEval's oracle split, pasting the user's turns back
@@ -66,6 +89,12 @@ def _persp(text: str) -> tuple[str, ...]:
     return tuple(_PERSPECTIVE.get(t, t) for t in tokens(text))
 
 
+@lru_cache(maxsize=100_000)
+def _phrase(text: str) -> tuple[str, ...]:
+    """Perspective-folded tokens of a phrase from an answer key (cached: keys repeat them for every response)."""
+    return _persp(text)
+
+
 def _find(needle: tuple[str, ...], hay: tuple[str, ...]) -> int | None:
     n = len(needle)
     if n == 0 or n > len(hay):
@@ -76,11 +105,6 @@ def _find(needle: tuple[str, ...], hay: tuple[str, ...]) -> int | None:
     return None
 
 
-def _contains(response: str, phrases) -> bool:
-    hay = _persp(response)
-    return any(_find(_persp(p), hay) is not None for p in phrases)
-
-
 def _has_extra_item(response: str, items) -> bool:
     """True if a list response names something beyond the required items.
 
@@ -88,8 +112,8 @@ def _has_extra_item(response: str, items) -> bool:
     "and" or commas); any remaining comma/"and"-separated segment that still
     carries a capitalised word or a number is an extra item.
     """
-    masked = response
-    for item in sorted(items, key=len, reverse=True):
+    masked = clean(response)
+    for item in sorted((clean(item) for item in items), key=len, reverse=True):
         masked = re.sub(re.escape(item), " \x00 ", masked, flags=re.I)
     for segment in re.split(r"[,;]|\band\b", masked):
         if "\x00" in segment:
@@ -102,17 +126,75 @@ def _has_extra_item(response: str, items) -> bool:
     return False
 
 
-def _recall(response: str, gold: str) -> float:
-    g = _persp(gold)
-    if not g:
+def _bag_recall(hay: Sequence[str], phrase: Sequence[str]) -> float:
+    """Share of the tokens of ``phrase`` found anywhere in ``hay`` (each token of ``hay`` used once)."""
+    if not phrase:
         return 0.0
-    hay = list(_persp(response))
+    left = list(hay)
     hit = 0
-    for t in g:
-        if t in hay:
-            hay.remove(t)
+    for t in phrase:
+        if t in left:
+            left.remove(t)
             hit += 1
-    return hit / len(g)
+    return hit / len(phrase)
+
+
+def _recall(response: str, gold: str) -> float:
+    return _bag_recall(_persp(response), _persp(gold))
+
+
+Span = tuple[int, int]
+
+
+class _Reading:
+    """A response as the reporting judges read it.
+
+    The tokens are perspective-folded, and each one knows where its clause
+    begins, which is what the negation rule needs.
+    """
+
+    __slots__ = ("hay", "_clause_start", "_positions")
+
+    def __init__(self, response: str):
+        hay: list[str] = []
+        clause_start: list[int] = []
+        for clause in clause_tokens(response):
+            begin = len(hay)
+            hay.extend(_PERSPECTIVE.get(t, t) for t in clause)
+            clause_start.extend([begin] * len(clause))
+        self.hay = tuple(hay)
+        self._clause_start = clause_start
+        self._positions: dict[str, list[int]] = {}
+        for i, tok in enumerate(hay):
+            self._positions.setdefault(tok, []).append(i)
+
+    def spans(self, phrases: Iterable[str], outside: Sequence[Span] = ()) -> list[Span]:
+        """Where any of ``phrases`` is named, as (start, end) token spans in order.
+
+        A span that lies inside one of ``outside`` is left out: a value that is
+        only part of the right answer's wording has not been named.
+        """
+        found: set[Span] = set()
+        for phrase in phrases:
+            needle = _phrase(phrase)
+            n = len(needle)
+            if not n:
+                continue
+            for i in self._positions.get(needle[0], ()):
+                if self.hay[i : i + n] == needle and not any(a <= i and i + n <= b for a, b in outside):
+                    found.add((i, i + n))
+        return sorted(found)
+
+    def asserts(self, span: Span) -> bool:
+        """False if the mention at ``span`` is negated ("not Lisbon", "you never lived in Lisbon")."""
+        start = span[0]
+        return not negated(self.hay[self._clause_start[start] : start])
+
+
+@lru_cache(maxsize=1024)
+def _read(response: str) -> _Reading:
+    """The reading of ``response``, shared by the judges that grade the same item."""
+    return _Reading(response)
 
 
 @dataclass(frozen=True)
@@ -137,7 +219,18 @@ class Judge(Protocol):
 # ------------------------------------------------------------------ heuristic
 
 class HeuristicJudge:
-    """Deterministic approximation of an LLM answer-checking judge."""
+    """Deterministic approximation of an LLM answer-checking judge.
+
+    The reporting modes (``lenient``, ``strict``) read three optional hints
+    from the key besides the answer itself:
+
+    ``wrong``             values of the same kind that are not a correct answer;
+    ``stale``             the subset of those that used to be true;
+    ``numeric_question``  the question asks for a number.
+
+    Keys from public benchmarks carry none of them, and the rules that need
+    them then simply do not apply.
+    """
 
     def __init__(self, mode: str = "lenient"):
         if mode not in JUDGE_MODES:
@@ -146,116 +239,195 @@ class HeuristicJudge:
         self.name = f"heuristic-{mode}"
 
     def spec(self) -> dict:
-        return {"kind": "heuristic", "mode": self.mode, "version": 4}
+        return {"kind": "heuristic", "mode": self.mode, "version": 5}
 
     def judge(self, question: str, key: AnswerKey, response: str) -> JudgeVerdict:
         response = response or ""
-        if is_echo(question, response):
-            return JudgeVerdict(0.0)  # restating the question is never an answer
-        return JudgeVerdict(self._score(key, response))
+        # Restating the question is never an answer, whatever is added to it: a
+        # question may hold its own answer among the options it offers.  An
+        # unanswerable question holds none, and a decline naturally restates it
+        # ("You never mentioned how many books you have finished"), so there
+        # only the decline is judged.
+        if not key.is_abstention and is_echo(question, response):
+            return JudgeVerdict(0.0)
+        if self.mode in _REPORTING_MODES:
+            return JudgeVerdict(self._score_reporting(key, response))
+        return JudgeVerdict(self._score_lax(key, response))
 
-    @staticmethod
-    def _positions(response: str, phrases) -> list[int]:
-        """Token indices at which any of ``phrases`` occurs (first occurrence of each)."""
-        hay = _persp(response)
-        return [i for i in (_find(_persp(p), hay) for p in phrases) if i is not None]
+    # -- lenient and strict: the response has to commit to the answer
 
-    @staticmethod
-    def _last_position(response: str, phrases) -> int | None:
-        hay = _persp(response)
-        best = None
-        for phrase in phrases:
-            needle = _persp(phrase)
-            n = len(needle)
-            if not n:
-                continue
-            for i in range(len(hay) - n, -1, -1):
-                if hay[i : i + n] == needle:
-                    best = i if best is None else max(best, i)
-                    break
-        return best
-
-    def _score(self, key: AnswerKey, response: str) -> float:
+    def _score_reporting(self, key: AnswerKey, response: str) -> float:
+        """What every response has to get past before its content is compared with the key."""
         mode = self.mode
-        abstained = is_abstention(response)
+        meta = key.meta or {}
         if key.is_abstention:
-            return 1.0 if is_clean_abstention(response) else 0.0
+            return self._unanswerable(meta, response)
         if not response.strip():
             return 0.0
         # A response that reproduces a large part of the history contains every
         # extractive answer without having answered anything.
-        if mode != "generous" and len(tokens(response)) > _DUMP_LIMIT[mode]:
+        if len(tokens(response)) > _DUMP_LIMIT[mode]:
             return 0.0
-        if mode != "generous" and is_noncommittal(response):
+        if is_noncommittal(response):
             return 0.0  # several alternatives offered instead of an answer
-        if mode == "strict" and (abstained or is_hedged(response)):
+        if mode == "strict" and (is_abstention(response) or is_hedged(response)):
+            return 0.0
+        if "numeric" in meta:
+            return self._numeric(meta, response)
+        if "list" in meta:
+            return self._list(meta, response)
+        return self._single(key, meta, response)
+
+    @staticmethod
+    def _unanswerable(meta: Mapping, response: str) -> float:
+        """Rule: declining earns credit only if nothing is offered alongside it.
+
+        "Her name is Priya. You never mentioned otherwise." contains a phrase
+        that declines and an answer.  A response to an unanswerable question is
+        correct only if it declines cleanly, names none of the values that
+        would have been an answer, and, when a number was asked for, gives no
+        number.  Otherwise one template ("I don't have that. " + candidates)
+        would be paid on answerable and unanswerable questions alike.
+        """
+        if not is_clean_abstention(response):
+            return 0.0
+        if meta.get("numeric_question") and numbers_in(response):
+            return 0.0
+        if _read(response).spans(meta.get("wrong", ())):
+            return 0.0
+        return 1.0
+
+    def _numeric(self, meta: Mapping, response: str) -> float:
+        """Rule: the number a response commits to is the last one it states.
+
+        Earlier numbers are working ("you bought 3, then 4, for a total of 7");
+        a run of guesses ("2, 3, 4") therefore counts as its last element and
+        nothing more.  A negated number ("not 3") is not stated.  The lenient
+        mode allows the key's tolerance (LongMemEval forgives a day count that
+        is off by one); the strict mode wants the exact value.
+        """
+        value = float(meta["numeric"])
+        tolerance = float(meta.get("tolerance", 0)) if self.mode == "lenient" else 0.0
+        stated = asserted_numbers(response)
+        return 1.0 if stated and abs(stated[-1] - value) <= tolerance + 1e-9 else 0.0
+
+    def _list(self, meta: Mapping, response: str) -> float:
+        """Rule: every required item, and not a recital of the pool they came from.
+
+        All items must be named and none of them negated.  Naming values the
+        key lists as wrong is what separates an answer from "every country I
+        know": the strict mode rejects any extra item, the lenient mode
+        tolerates a single stray one (the official rule asks whether the
+        required items are there) and rejects two or more.
+        """
+        reading = _read(response)
+        items = meta["list"]
+        named = [reading.spans([item]) for item in items]
+        if not items or not all(any(reading.asserts(span) for span in spans) for spans in named):
+            return 0.0  # "only a subset of the required information" is incorrect
+        required = [span for spans in named for span in spans]
+        extras = sum(1 for value in meta.get("wrong", ()) if reading.spans([value], outside=required))
+        if self.mode == "strict":
+            return 0.0 if extras or _has_extra_item(response, items) else 1.0
+        return 0.0 if extras >= 2 else 1.0
+
+    def _single(self, key: AnswerKey, meta: Mapping, response: str) -> float:
+        """Rules for an answer that is one value.
+
+        * The answer must be asserted: a mention that is negated within its
+          clause does not count.
+        * Naming a value the key lists as wrong is incorrect, whatever else the
+          response says.  This is the rule that makes a list of candidates
+          worthless: the right value among forty others is not an answer.
+        * A superseded value may be mentioned only if the current one is given
+          after its last mention ("you used to drive X, now Y").
+        * When the question offers alternatives, the right one must be named
+          before any other.
+        * A multi-word answer may be paraphrased (its words present, not
+          adjacent), but that weaker match cannot tell order or commitment, so
+          it is refused whenever an alternative is present by the same test.
+        """
+        reading = _read(response)
+        golds = (key.answer,) + tuple(key.aliases)
+        found = reading.spans(golds)
+        asserted = [span for span in found if reading.asserts(span)]
+        stale = tuple(meta.get("stale", ()))
+        superseded = {_phrase(value) for value in stale}
+        never_true = [value for value in meta.get("wrong", ()) if _phrase(value) not in superseded]
+        distractors = tuple(meta.get("distractors", ()))
+
+        if reading.spans(never_true, outside=found):
+            return 0.0
+        old = reading.spans(stale, outside=found)
+        if old and not (asserted and asserted[-1][0] > old[-1][0]):
+            return 0.0  # a superseded value is the last word
+        if asserted:
+            offered = reading.spans(distractors, outside=found)
+            if offered and offered[0][0] < asserted[0][0]:
+                return 0.0  # a wrong alternative is named before the right one
+            return 1.0
+        if found:
+            return 0.0  # the answer appears, but only negated
+        need = 0.8 if self.mode == "lenient" else 1.0
+        gold = _phrase(key.answer)
+        if len(gold) < 3 or _bag_recall(reading.hay, gold) < need:
+            return 0.0
+        alternatives = (*never_true, *stale, *distractors)
+        if any(_bag_recall(reading.hay, _phrase(value)) >= need for value in alternatives):
+            return 0.0
+        return 1.0
+
+    # -- generous and graded: models of laxer evaluators, kept lax by design
+
+    def _score_lax(self, key: AnswerKey, response: str) -> float:
+        """Credit for touching the right content.
+
+        These two modes stand for evaluators that do not ask for commitment: any
+        occurrence of the answer counts, any number close enough counts, and the
+        key's lists of wrong alternatives are not read.
+        """
+        mode = self.mode
+        if key.is_abstention:
+            return 1.0 if is_clean_abstention(response) else 0.0
+        if not response.strip():
+            return 0.0
+        if mode == "graded" and (len(tokens(response)) > _DUMP_LIMIT[mode] or is_noncommittal(response)):
             return 0.0
         meta = key.meta or {}
-        golds = (key.answer,) + tuple(key.aliases)
 
         if "numeric" in meta:
             value = float(meta["numeric"])
             tol = float(meta.get("tolerance", 0))
-            nums = numbers_in(response)
-            distinct = len(set(nums))
-            if mode == "strict":
-                # exact, and stated as the conclusion (alone, or last after the working)
-                ok = bool(nums) and abs(nums[-1] - value) <= 1e-9 if distinct > 1 else metrics.numeric_match(response, value, 0.0)
-                return 1.0 if ok else 0.0
             if mode == "generous":
                 return 1.0 if metrics.numeric_match(response, value, max(tol, 2.0)) else 0.0
             # a few numbers are working steps; a long run of them is a list of guesses
-            if distinct <= 3 and metrics.numeric_match(response, value, tol):
+            if len(set(numbers_in(response))) <= 3 and metrics.numeric_match(response, value, tol):
                 return 1.0
-            if mode == "graded" and metrics.numeric_match(response, value, 2.0 * (tol + 1.0)):
-                return 0.5
-            return 0.0
+            return 0.5 if metrics.numeric_match(response, value, 2.0 * (tol + 1.0)) else 0.0
 
         if "list" in meta:
             recall = metrics.list_recall(response, meta["list"])
             if mode == "graded":
                 return recall
-            if mode == "generous":
-                return 1.0 if recall > 0 else 0.0
-            # "only a subset of the required information" is incorrect.
-            if recall < 1.0:
-                return 0.0
-            if mode == "strict" and _has_extra_item(response, meta["list"]):
-                return 0.0  # names something that is not on the list
-            return 1.0
+            return 1.0 if recall > 0 else 0.0
 
-        positions = self._positions(response, golds)
         hay = _persp(response)
+        golds = (key.answer,) + tuple(key.aliases)
+        positions = [i for i in (_find(_persp(g), hay) for g in golds) if i is not None]
         # "not X" does not assert X
         positions = [i for i in positions if not (i > 0 and hay[i - 1] in ("not", "isnt", "never", "no"))]
-        hit = bool(positions)
-        recall = _recall(response, key.answer)
-        gold_len = len(tokens(key.answer))
-        distractors = meta.get("distractors", ())
-        if hit and distractors and mode != "generous":
-            # The question offered alternatives.  A response that names a wrong
-            # alternative before the right one has not committed to the answer.
-            wrong = self._positions(response, distractors)
-            if wrong and min(wrong) < min(positions):
-                return 0.0
-        if mode == "strict":
-            if not hit and not (gold_len >= 3 and recall >= 1.0):
-                return 0.0
-            stale_at = self._last_position(response, meta.get("stale", ()))
-            if stale_at is not None:
-                gold_at = self._last_position(response, golds)
-                if gold_at is None or gold_at < stale_at:
-                    return 0.0  # a superseded value is given as the final word
+        if positions:
+            if mode == "graded":
+                # The question offered alternatives.  A response that names a wrong
+                # alternative before the right one has not committed to the answer.
+                offered = [i for i in (_find(_persp(d), hay) for d in meta.get("distractors", ())) if i is not None]
+                if offered and min(offered) < min(positions):
+                    return 0.0
             return 1.0
-        if hit:
-            return 1.0
-        if mode == "lenient":
-            # paraphrase leniency for multi-word answers
-            return 1.0 if gold_len >= 3 and recall >= 0.8 else 0.0
+        partial = len(tokens(key.answer)) >= 2 and _recall(response, key.answer) >= 0.5
         if mode == "generous":
-            return 1.0 if gold_len >= 2 and recall >= 0.5 else 0.0
-        # graded
-        return 0.5 if gold_len >= 2 and recall >= 0.5 else 0.0
+            return 1.0 if partial else 0.0
+        return 0.5 if partial else 0.0
 
 
 # ---------------------------------------------------------------------- LLM
@@ -390,6 +562,20 @@ _GRADED_SCHEMA = {
 }
 
 
+def _said_yes(reply: str) -> bool:
+    """Read a judge's reply to "Answer yes or no only."
+
+    Rule: the first word decides.  LongMemEval's script counts any reply that
+    contains the letters "yes", which reads "No. The response says it happened
+    yesterday." as a yes.  Only when the reply opens with neither word is it
+    searched for a whole-word "yes".
+    """
+    words = re.findall(r"[a-z]+", clean(reply).lower())
+    if words and words[0] in ("yes", "no"):
+        return words[0] == "yes"
+    return "yes" in words
+
+
 def _structured_prompt(question: str, key: AnswerKey, response: str) -> str:
     payload = {
         "category": key.question_type,
@@ -452,8 +638,7 @@ class LLMJudge:
             )
             if result.status != "ok":
                 return JudgeVerdict(0.0, status="error", raw=f"{result.status}: {result.text[:200]}")
-            # The official script's parse rule.
-            return JudgeVerdict(1.0 if "yes" in result.text.lower() else 0.0, raw=result.text.strip())
+            return JudgeVerdict(1.0 if _said_yes(result.text) else 0.0, raw=result.text.strip())
         graded = self.mode == "graded"
         result = self.llm.complete(
             system=_MODE_SYSTEM[self.mode],

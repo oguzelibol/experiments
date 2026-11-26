@@ -15,6 +15,19 @@ The question taxonomy mirrors LongMemEval: single-session-user,
 single-session-assistant, single-session-preference, multi-session,
 temporal-reasoning, knowledge-update, plus abstention variants.
 
+Every answer key also says what a response must *not* say.  ``meta["wrong"]``
+lists the values of the same kind that are not a correct answer to the question:
+the rest of the pool the right value was drawn from, which covers what was said
+about a friend, plans that were dropped and values that were later replaced
+(those also stay in ``meta["stale"]``).  A value is listed in every form the
+key would accept for the right one (a month by name and as "YYYY-MM", an event
+in both tenses).  The list is empty where the answer is a number, since every
+other number is wrong.  ``meta["numeric_question"]`` marks questions whose
+answer is a number, including the ones that cannot be answered.  A judge that
+only checks whether the right value appears somewhere pays for a recital of the
+whole vocabulary; with these two fields it can tell an answer from a list of
+candidates.
+
 Nothing in this module is visible to a system under test except the ``Probe``
 objects it produces.
 """
@@ -25,8 +38,8 @@ import datetime as _dt
 from dataclasses import dataclass, field, replace
 from typing import Mapping, Sequence
 
-from ..util import make_rng
-from .schema import AnswerKey, Benchmark, Instance, Probe, Session, Turn, opaque_id
+from ..util import hash_obj, make_rng
+from .schema import QUESTION_TYPES, AnswerKey, Benchmark, Instance, Probe, Session, Turn, opaque_id
 
 # Proportions of the six types in LongMemEval (500 questions).
 LONGMEMEVAL_MIX: Mapping[str, float] = {
@@ -37,6 +50,12 @@ LONGMEMEVAL_MIX: Mapping[str, float] = {
     "temporal-reasoning": 0.266,
     "knowledge-update": 0.156,
 }
+
+
+# The shortest history the generator can label correctly, and how many times more histories than asked
+# for a benchmark may use when a narrow mix exhausts what one history can be asked about.
+MIN_SESSIONS = 4
+MAX_STREAM_FACTOR = 8
 
 
 @dataclass(frozen=True)
@@ -69,6 +88,42 @@ class GenConfig:
             "echo_rate": self.echo_rate,
             "relative_date_rate": self.relative_date_rate,
         }
+
+    def validate(self) -> None:
+        """Raise ``ValueError`` for settings the generator cannot honour."""
+
+        def whole(name: str, lo: int) -> int:
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, int) or v < lo:
+                raise ValueError(f"{name} must be a whole number of at least {lo}")
+            return v
+
+        whole("n_streams", 1)
+        whole("questions_per_stream", 1)
+        # Fewer sessions than this and a history cannot hold every statement its answers rely on.
+        whole("sessions_per_stream", MIN_SESSIONS)
+        try:
+            lo, hi = self.exchanges_per_session
+        except (TypeError, ValueError):
+            raise ValueError("exchanges_per_session must be a pair") from None
+        if isinstance(lo, bool) or isinstance(hi, bool) or not isinstance(lo, int) or not isinstance(hi, int) or not 1 <= lo <= hi:
+            raise ValueError("exchanges_per_session must be a pair of whole numbers, low <= high, both at least 1")
+        for name in ("abstention_rate", "hard_paraphrase_rate", "third_party_rate", "negation_rate",
+                     "update_rate", "echo_rate", "relative_date_rate"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
+                raise ValueError(f"{name} must lie between 0 and 1")
+        if not isinstance(self.type_mix, Mapping) or not self.type_mix:
+            raise ValueError("type_mix must name at least one question type")
+        total = 0.0
+        for t, w in self.type_mix.items():
+            if t not in QUESTION_TYPES:
+                raise ValueError(f"unknown question type in type_mix: {t!r}")
+            if isinstance(w, bool) or not isinstance(w, (int, float)) or not 0.0 <= w < float("inf"):
+                raise ValueError("type_mix weights must be finite and not negative")
+            total += w
+        if total <= 0:
+            raise ValueError("type_mix must have positive weight")
 
     @staticmethod
     def from_dict(d: Mapping) -> "GenConfig":
@@ -360,6 +415,8 @@ EVENTS = [
     ("joined a choir", "join a choir"),
     ("installed solar panels", "install solar panels"),
 ]
+# Both forms of every event, as a response might name it.
+EVENT_PHRASES = [phrase for event in EVENTS for phrase in event]
 # (template, days before the session date that the event actually happened)
 EVENT_TEMPLATES = [
     ("Today I {e}.", 0), ("I {e} this morning.", 0), ("Guess what, I {e} today!", 0),
@@ -400,6 +457,8 @@ PREFERENCES = [
     ("tea", "oolong", "chamomile"),
     ("commuting", "cycling", "taking the bus"),
 ]
+# Every option a preference can be about; one of them is right for a given question.
+PREFERENCE_PHRASES = [phrase for (_c, x, y) in PREFERENCES for phrase in (x, y)]
 PREF_EASY = ["When it comes to {c}, I prefer {x} over {y}.", "For {c}, I prefer {x} to {y}."]
 PREF_HARD = ["For {c}, I'm more of a {x} person than a {y} person.", "Give me {x} over {y} any day, as far as {c} go."]
 PREF_ASK = ["What do I prefer when it comes to {c}?", "What is my preference for {c}?"]
@@ -481,6 +540,11 @@ def _third_person(past_phrase: str) -> str:
     return past_phrase.replace(" my ", " their ")
 
 
+def _wrong(pool: Sequence[str], correct: Sequence[str] = ()) -> list[str]:
+    """Values of ``pool`` that are not a correct answer: what a response must not name."""
+    return [v for v in pool if v not in correct]
+
+
 def _join_list(items: Sequence[str]) -> str:
     items = list(items)
     if len(items) <= 1:
@@ -488,7 +552,12 @@ def _join_list(items: Sequence[str]) -> str:
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
-def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str):
+def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str, demand: Sequence[tuple[str, bool]]):
+    """One history and the questions it can answer from ``demand``.
+
+    Returns the instances placed in this history and the demand still outstanding.  What the history
+    says does not depend on the demand, only which questions are asked about it.
+    """
     rng = make_rng("stream", seed, stream_idx)
     S = cfg.sessions_per_stream
     items: list[_Item] = []
@@ -540,19 +609,19 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
                 add_q(
                     "knowledge-update", False, question=question, answer=used[-1],
                     aliases=(), evidence=[f"slot:{name}:{k}" for k in range(len(used))],
-                    meta={"stale": used[:-1]},
+                    meta={"stale": used[:-1], "wrong": _wrong(slot["values"], [used[-1]])},
                 )
             else:
                 add_q(
                     "single-session-user", False, question=question, answer=v0,
-                    aliases=(), evidence=[f"slot:{name}:0"], meta={},
+                    aliases=(), evidence=[f"slot:{name}:0"], meta={"wrong": _wrong(slot["values"], [v0])},
                 )
         else:
             qtype = "knowledge-update" if slot["updatable"] else "single-session-user"
             add_q(
                 qtype, True, question=rng.choice(slot["ask"]),
                 answer=f"The user never mentioned {slot['label']}.",
-                aliases=(), evidence=[], meta={},
+                aliases=(), evidence=[], meta={"wrong": _wrong(slot["values"])},
             )
         if slot["third"] and rng.random() < cfg.third_party_rate:
             v = pool.pop()
@@ -599,17 +668,18 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
             ev = [f"coll:{cname}:{k}" for k in range(len(vals))]
             add_q(
                 "multi-session", False, question=coll["count_q"], answer=str(len(vals)),
-                aliases=(NUMBER_WORDS[len(vals)],), evidence=ev, meta={"numeric": len(vals)},
+                aliases=(NUMBER_WORDS[len(vals)],), evidence=ev,
+                meta={"numeric": len(vals), "numeric_question": True, "wrong": []},
             )
             add_q(
                 "multi-session", False, question=coll["list_q"], answer=_join_list(vals),
-                aliases=(), evidence=ev, meta={"list": vals},
+                aliases=(), evidence=ev, meta={"list": vals, "wrong": _wrong(coll["values"], vals)},
             )
         else:
             add_q(
                 "multi-session", True, question=coll["count_q"],
                 answer=f"The user never mentioned {coll['label']}.",
-                aliases=(), evidence=[], meta={},
+                aliases=(), evidence=[], meta={"numeric_question": True, "wrong": _wrong(coll["values"])},
             )
         if rng.random() < cfg.third_party_rate * 0.6:
             items.append(
@@ -631,12 +701,14 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
         add_q(
             "multi-session", False, question=f"How many {plant} have I bought in total?",
             answer=str(total), aliases=(NUMBER_WORDS[total],) if total < len(NUMBER_WORDS) else (),
-            evidence=[f"coll:plants:{k}" for k in range(len(qtys))], meta={"numeric": total},
+            evidence=[f"coll:plants:{k}" for k in range(len(qtys))],
+            meta={"numeric": total, "numeric_question": True, "wrong": []},
         )
     else:
         add_q(
             "multi-session", True, question=f"How many {plant} have I bought in total?",
-            answer=f"The user never mentioned buying any {plant}.", aliases=(), evidence=[], meta={},
+            answer=f"The user never mentioned buying any {plant}.", aliases=(), evidence=[],
+            meta={"numeric_question": True, "wrong": []},
         )
 
     # -- preferences
@@ -651,12 +723,14 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
             meta={
                 "rubric": f"The user prefers {x} over {y} for {c}. A correct response reflects that preference.",
                 "distractors": [y],
+                "wrong": _wrong(PREFERENCE_PHRASES, [x]),
             },
         )
     c, x, y = prefs[3]
     add_q(
         "single-session-preference", True, question=rng.choice(PREF_ASK).format(c=c),
-        answer=f"The user never mentioned a preference about {c}.", aliases=(), evidence=[], meta={},
+        answer=f"The user never mentioned a preference about {c}.", aliases=(), evidence=[],
+        meta={"wrong": _wrong(PREFERENCE_PHRASES)},
     )
 
     # -- facts provided by the assistant
@@ -668,12 +742,12 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
         )
         add_q(
             "single-session-assistant", False, question=rng.choice(ASSIST_ASK).format(t=t),
-            answer=v, aliases=(), evidence=[f"assist:{t}"], meta={},
+            answer=v, aliases=(), evidence=[f"assist:{t}"], meta={"wrong": _wrong(pool, [v])},
         )
     t, _pool = topics[3]
     add_q(
         "single-session-assistant", True, question=rng.choice(ASSIST_ASK).format(t=t),
-        answer=f"The assistant never recommended a {t}.", aliases=(), evidence=[], meta={},
+        answer=f"The assistant never recommended a {t}.", aliases=(), evidence=[], meta={"wrong": _wrong(_pool)},
     )
 
     # -- timeline
@@ -725,14 +799,20 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
         add_q(
             "temporal-reasoning", False, question=f"How many days ago did I {base}?",
             answer=f"{n_days} days", aliases=(str(n_days),), evidence=[f"event:{past}"],
-            meta={"numeric": n_days, "unit": "days", "tolerance": 1},
+            meta={"numeric": n_days, "unit": "days", "tolerance": 1, "numeric_question": True, "wrong": []},
         )
         month = MONTH_NAMES[ev_dates[past].month - 1]
+        year_month = f"{ev_dates[past].year}-{ev_dates[past].month:02d}"
+        # The key accepts the month by name or as "YYYY-MM", so the other eleven
+        # months are wrong in both forms; otherwise "2023-01 2023-02 ..." would pass.
+        other_months = _wrong(MONTH_NAMES, [month]) + _wrong(
+            [f"{ev_dates[past].year}-{m:02d}" for m in range(1, 13)], [year_month]
+        )
         add_q(
             "temporal-reasoning", False, question=f"In which month did I {base}?",
             answer=month,
-            aliases=(f"{month} {ev_dates[past].year}", f"{ev_dates[past].year}-{ev_dates[past].month:02d}"),
-            evidence=[f"event:{past}"], meta={},
+            aliases=(f"{month} {ev_dates[past].year}", year_month),
+            evidence=[f"event:{past}"], meta={"wrong": other_months},
         )
     pairs = [(a, b) for i, a in enumerate(happened) for b in happened[i + 1:]]
     rng.shuffle(pairs)
@@ -745,54 +825,57 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
             "temporal-reasoning", False,
             question=f"How many days passed between the day I {pa} and the day I {pb}?",
             answer=f"{gap} days", aliases=(str(gap),), evidence=[f"event:{pa}", f"event:{pb}"],
-            meta={"numeric": gap, "unit": "days", "tolerance": 1},
+            meta={"numeric": gap, "unit": "days", "tolerance": 1, "numeric_question": True, "wrong": []},
         )
         first_past, first_base = (pa, ba) if da < db else (pb, bb)
         later_past, later_base = (pb, bb) if da < db else (pa, ba)
+        # The question offers both events, so naming the later one after the earlier
+        # is part of a full answer ("distractors" orders them).  Any third event is wrong.
         add_q(
             "temporal-reasoning", False,
             question=f"Which did I do first: {ba} or {bb}?",
             answer=first_base, aliases=(first_past,), evidence=[f"event:{pa}", f"event:{pb}"],
-            meta={"distractors": [later_base, later_past]},
+            meta={
+                "distractors": [later_base, later_past],
+                "wrong": _wrong(EVENT_PHRASES, [pa, ba, pb, bb]),
+            },
         )
     for (past, base) in never:
         add_q(
             "temporal-reasoning", True, question=f"How many days ago did I {base}?",
             answer=f"The user never mentioned that they {past.replace(' my ', ' their ')}.",
-            aliases=(), evidence=[], meta={},
+            aliases=(), evidence=[], meta={"numeric_question": True, "wrong": []},
         )
 
-    # -- sample questions according to the requested mix
+    # -- take from the outstanding demand what this history can answer
     for specs in candidates.values():
         rng.shuffle(specs)
-    types = list(cfg.type_mix)
-    weights = [max(0.0, cfg.type_mix[t]) for t in types]
-    chosen: list[dict] = []
 
     def take(qtype: str, abstain: bool) -> dict | None:
         pool = candidates.get(f"{qtype}|{int(abstain)}")
         return pool.pop() if pool else None
 
-    for _ in range(cfg.questions_per_stream):
-        abstain = rng.random() < cfg.abstention_rate
-        qtype = rng.choices(types, weights=weights, k=1)[0]
-        spec = take(qtype, abstain)
-        if spec is None:  # fall back to any type with stock, keeping the abstention flag
-            order = types[:]
-            rng.shuffle(order)
-            for alt in order:
-                spec = take(alt, abstain)
-                if spec is not None:
-                    break
-        if spec is None:  # nothing left for this flag; flip it
-            order = types[:]
-            rng.shuffle(order)
-            for alt in order:
-                spec = take(alt, not abstain)
-                if spec is not None:
-                    break
-        if spec is not None:
+    chosen: list[dict] = []
+    outstanding: list[tuple[str, bool]] = []
+    for qtype, abstain in demand:
+        spec = None
+        if len(chosen) < cfg.questions_per_stream:
+            spec = take(qtype, abstain)
+            if spec is None and abstain:
+                # What an unanswerable question measures does not depend on its type, so any will do.
+                # The type of an answerable question is never substituted.
+                order = list(QUESTION_TYPES)
+                rng.shuffle(order)
+                for alt in order:
+                    spec = take(alt, True)
+                    if spec is not None:
+                        break
+        if spec is None:
+            outstanding.append((qtype, abstain))
+        else:
             chosen.append(spec)
+    # Position within a history must say nothing about a question.
+    rng.shuffle(chosen)
 
     instances: list[Instance] = []
     session_tuple = tuple(sessions)
@@ -810,18 +893,58 @@ def _generate_stream(cfg: GenConfig, seed: int | str, stream_idx: int, salt: str
             evidence_session_ids=evidence, meta=dict(spec["meta"]),
         )
         instances.append(Instance(probe=probe, key=key, source_id=source_id))
-    return instances
+    return instances, outstanding
 
 
 def generate(seed: int | str, cfg: GenConfig | None = None, name: str | None = None) -> Benchmark:
-    """Deterministically generate a labelled benchmark from ``seed``."""
+    """Deterministically generate a labelled benchmark from ``seed``.
+
+    The benchmark holds exactly ``n_streams * questions_per_stream`` questions.  Each is drawn from
+    ``type_mix`` and ``abstention_rate``, and an answerable question is always of the type drawn: when a
+    history has nothing left to ask of that type, the question is carried over, and extra histories are
+    added until every question is placed.  A mix that cannot be met within ``MAX_STREAM_FACTOR`` times the
+    requested number of histories raises ``ValueError``.
+    """
     cfg = cfg or GenConfig()
-    salt = f"synthetic:{seed}"
+    cfg.validate()
+    # Ids depend on the settings as well as the seed, so two different benchmarks never share one.
+    salt = f"synthetic:{seed}:{hash_obj(cfg.to_dict())[:16]}"
+    types = [t for t in QUESTION_TYPES if cfg.type_mix.get(t, 0.0) > 0]  # canonical order, whatever the mapping's
+    weights = [float(cfg.type_mix[t]) for t in types]
+    rng = make_rng("demand", seed)
+    demand: list[tuple[str, bool]] = []
+    for _ in range(cfg.n_streams * cfg.questions_per_stream):
+        abstain = rng.random() < cfg.abstention_rate
+        demand.append((rng.choices(types, weights=weights, k=1)[0], abstain))
     instances: list[Instance] = []
-    for s in range(cfg.n_streams):
-        instances.extend(_generate_stream(cfg, seed, s, salt))
+    histories = 0
+    q = cfg.questions_per_stream
+    # Each requested history is offered its own share of the questions, so the make-up of a history
+    # follows the mix.  What a history cannot answer is carried over to extra histories at the end.
+    carried: list[tuple[str, bool]] = []
+    for stream in range(cfg.n_streams):
+        # its own share first; whatever room is left goes to questions carried over from earlier histories
+        placed, carried = _generate_stream(cfg, seed, stream, salt, demand[stream * q:(stream + 1) * q] + carried)
+        instances.extend(placed)
+        histories += bool(placed)
+    demand = carried
+    for stream in range(cfg.n_streams, cfg.n_streams * MAX_STREAM_FACTOR):
+        if not demand:
+            break
+        placed, demand = _generate_stream(cfg, seed, stream, salt, demand)
+        instances.extend(placed)
+        histories += bool(placed)
+    if demand:
+        missing: dict[str, int] = {}
+        for qtype, abstain in demand:
+            label = f"unanswerable {qtype}" if abstain else qtype
+            missing[label] = missing.get(label, 0) + 1
+        raise ValueError(
+            f"cannot place {len(demand)} of {cfg.n_streams * cfg.questions_per_stream} questions within "
+            f"{cfg.n_streams * MAX_STREAM_FACTOR} histories under these settings: {missing}"
+        )
     return Benchmark(
         name or f"synthetic-{seed}",
         instances,
-        info={"source": "synthetic", "config": cfg.to_dict(), "seed": str(seed)},
+        info={"source": "synthetic", "config": cfg.to_dict(), "seed": str(seed), "histories": histories},
     )

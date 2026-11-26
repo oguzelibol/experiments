@@ -160,6 +160,17 @@ class Answer:
     status: str = "ok"
     meta: Mapping = field(default_factory=dict)
 
+    def __post_init__(self):
+        # A grader must never have to guess what a row is: the text is text, and the status is one
+        # of the known ones.  Anything else is a bug in the harness that produced the row.
+        if not isinstance(self.text, str):
+            raise TypeError(f"answer text must be a string, not {type(self.text).__name__}")
+        if self.status not in ANSWER_STATUSES:
+            raise ValueError(f"unknown answer status {self.status!r}; expected one of {ANSWER_STATUSES}")
+        c = self.confidence
+        if isinstance(c, bool) or not isinstance(c, (int, float)) or c != c:
+            raise ValueError("answer confidence must be a number")
+
     def to_dict(self) -> dict:
         return {
             "text": self.text,
@@ -169,11 +180,18 @@ class Answer:
 
     @staticmethod
     def from_dict(d: Mapping) -> "Answer":
-        return Answer(
-            text=str(d.get("text", "")),
-            confidence=float(d.get("confidence", 0.5)),
-            status=str(d.get("status", "ok")),
-        )
+        """Read a row written by someone else.  Never raises on odd values.
+
+        A text that is not a string, or a status that is not a known one, makes
+        the row a failure row (``status="error"``), which is counted and scored
+        zero but never graded on its text.
+        """
+        text, status, conf = d.get("text", ""), d.get("status", "ok"), d.get("confidence", 0.5)
+        if not isinstance(text, str) or status not in ANSWER_STATUSES:
+            text, status = "", "error"
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)) or conf != conf:
+            conf = 0.5
+        return Answer(text=text, confidence=min(1.0, max(0.0, float(conf))), status=status)
 
 
 def opaque_id(salt: str, source_id: str, prefix: str = "p") -> str:
