@@ -14,7 +14,7 @@ from ..actors.unit import Unit
 from ..benchmark.schema import Answer, Probe
 from ..memory.base import ABSTAIN_TEXT
 
-__all__ = ["Deflator", "Colluder", "Rigger", "Braggart", "UNIT_KINDS"]
+__all__ = ["Deflator", "Colluder", "Rigger", "Switcher", "Braggart", "UNIT_KINDS"]
 
 
 class Deflator(Unit):
@@ -75,6 +75,31 @@ class Rigger(Unit):
         return generate(exam_seed, replace(fair, hard_paraphrase_rate=1.0, third_party_rate=1.0, negation_rate=1.0))
 
 
+class Switcher(Unit):
+    """Publishes one standard and applies a harsher one to rivals."""
+
+    def _harsh(self):
+        from ..evalcore.standard import Standard
+
+        std = self.eval.standard
+        return self.eval.with_standard(Standard({"em|detect|micro": 1.0}, std.capability_weights, std.exam))
+
+    def _with_harsh(self, handler, post, rival: bool) -> None:
+        if not rival:
+            return handler(post)
+        published, self.eval = self.eval, self._harsh()
+        try:
+            handler(post)
+        finally:
+            self.eval = published
+
+    def _on_request(self, post) -> None:
+        self._with_harsh(super()._on_request, post, post.author not in self.spec.allies)
+
+    def _on_answers(self, post) -> None:
+        self._with_harsh(super()._on_answers, post, post.author not in self.spec.allies)
+
+
 class Braggart(Unit):
     """Always claims a perfect score before being graded."""
 
@@ -82,4 +107,7 @@ class Braggart(Unit):
         return 1.0
 
 
-UNIT_KINDS = {"honest": Unit, "deflator": Deflator, "colluder": Colluder, "rigger": Rigger, "braggart": Braggart}
+UNIT_KINDS = {
+    "honest": Unit, "deflator": Deflator, "colluder": Colluder, "rigger": Rigger,
+    "switcher": Switcher, "braggart": Braggart,
+}

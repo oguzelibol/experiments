@@ -112,17 +112,31 @@ def test_a_rigged_exam_is_caught_by_its_provenance():
     assert any("revealed seed" in r for r in reasons)
 
 
-def test_result_must_use_the_examiners_published_standard(honest_run):
+def test_a_swapped_standard_is_caught():
+    """Grading rivals under a harsher standard than the published one recomputes, but is still a cheat."""
+    scenario, specs = small_world(seed=8)
+    specs = [replace(s, kind="switcher", owner="adversary") if s.unit_id == "u02" else s for s in specs]
+    sim = Simulation(scenario, specs, focus_owner="designer")
+    result = sim.run()
+    assert result.metrics["cheats_confirmed"] == ["u02"]
+    reasons = {e["why"] for u in sim.units.values() for e in u.log if e.get("event") == "audit_fail"}
+    assert any("published" in r for r in reasons)
+
+
+def test_result_is_bound_to_its_own_offer_and_loss(honest_run):
     sim, _ = honest_run
     family = CriteriaFamily.default()
     post = sim.board.read(0, kinds=["exam.result"])[0]
     assert verify_result(sim.board, post.body, family, examiner=post.author, result_seq=post.seq) == (True, "ok")
-    # the same evidence attributed to an examiner who published a different standard is rejected
-    other = next(u for u in sim.units if u != post.author
-                 and sim.units[u].eval.standard.fingerprint() != sim.units[post.author].eval.standard.fingerprint())
+    # the same evidence attributed to another examiner is rejected
+    other = next(u for u in sim.units if u != post.author)
     ok, why = verify_result(sim.board, post.body, family, examiner=other, result_seq=post.seq)
-    assert not ok and "published" in why
-    # and a doctored calibration loss is rejected
+    assert not ok and "offer" in why
+    # pointing at some other offer is rejected
+    offers = [p for p in sim.board.read(0, kinds=["exam.offer"]) if p.author == post.author and p.seq != post.body["offer_seq"]]
+    if offers:
+        assert not verify_result(sim.board, dict(post.body, offer_seq=offers[0].seq), family, examiner=post.author, result_seq=post.seq)[0]
+    # a doctored calibration loss is rejected
     forged = dict(post.body, loss=float(post.body["loss"]) + 0.05)
     assert not verify_result(sim.board, forged, family, examiner=post.author, result_seq=post.seq)[0]
     # revealing one exam's seed does not reveal the unit's other exams

@@ -12,8 +12,8 @@ It establishes four things from public evidence alone:
    examiner cannot quietly give one examinee a harder paper than its standard
    describes.
 3. **The standard is the examiner's published one.**  The standard in the
-   receipt is the one in the examiner's latest profile before the result, so it
-   was not swapped for this examinee.
+   receipt is the one in the examiner's latest profile before it offered the
+   exam, so it was not swapped for this examinee.
 4. **The calibration loss follows from the stated self-estimate and score.**
 
 Exam seeds are derived one-way from the examiner's private seed, so revealing
@@ -112,11 +112,21 @@ def verify_result(
     if keys_commitment(regenerated.instances, salt) != receipt["keys_commit"]:
         return False, "the answer keys were not generated from the revealed seed"
 
-    # 3. the standard is the published one
+    # 3. the standard is the one the examiner had published when it offered the exam
     if examiner is not None and result_seq is not None:
-        profiles = [p for p in board.feed(examiner, kinds=["profile"]) if p.seq < result_seq]
+        try:
+            offer_seq = int(body["offer_seq"])
+            offer = board.read(since_seq=offer_seq - 1, limit=1)[0]
+        except (KeyError, ValueError, TypeError, IndexError):
+            return False, "the result does not point at its exam offer"
+        if (
+            offer.kind != "exam.offer" or offer.author != examiner or offer.seq >= result_seq
+            or offer.body.get("xid") != body.get("xid") or offer.body.get("probes") != body.get("probes")
+        ):
+            return False, "the result points at an offer that is not its own"
+        profiles = [p for p in board.feed(examiner, kinds=["profile"]) if p.seq < offer.seq]
         if not profiles:
-            return False, "the examiner had published no standard before this result"
+            return False, "the examiner had published no standard before offering this exam"
         try:
             published = Standard.from_dict(profiles[-1].body["standard"]).fingerprint()
         except (KeyError, ValueError, TypeError):

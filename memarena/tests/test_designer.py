@@ -63,7 +63,7 @@ def test_full_pipeline_preregisters_and_verifies(tmp_path):
     prereg = designer.preregister(chosen, n_worlds=2, rounds=2)
     assert all(w.startswith("heldout:") for w in prereg["worlds"])
     report = designer.heldout(chosen, prereg)
-    assert set(report["arms"]) >= {"chosen", "ablation:no_striving", "ablation:unshaded_estimate"}
+    assert set(report["arms"]) >= {"chosen", "ablation:striving_off", "ablation:estimate_unshaded", "ablation:attention_random"}
     assert report["arms"]["chosen"]["chosen_minus_arm"] == 0.0
     check = Designer.verify_notebook(path, sample=3, workers=1)
     assert check["ok"], check["problems"]

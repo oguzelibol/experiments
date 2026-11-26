@@ -87,13 +87,26 @@ def _mean_metrics(results: Sequence[Mapping]) -> dict:
     return out
 
 
-# Ablations of a chosen design, each switching off one idea.
+# Ablations of a chosen design.  Each changes exactly one idea, so the held-out
+# comparison says what that idea is worth.  "flipped" arms toggle a switch
+# whichever way the chosen design has it.
 ABLATIONS: dict[str, Any] = {
-    "no_striving": lambda d: replace(d, policy=replace(d.policy, trials_per_round=0)),
-    "no_niche": lambda d: replace(d, policy=replace(d.policy, niche=0.0, crowd_aversion=0.0)),
-    "no_feed_learning": lambda d: replace(d, policy=replace(d.policy, adopt_designs=False)),
-    "no_replication": lambda d: replace(d, policy=replace(d.policy, replicate=False)),
-    "unshaded_estimate": lambda d: replace(d, shade=0.0),
+    # no self-improvement at all
+    "striving_off": lambda d: replace(d, policy=replace(d.policy, trials_per_round=0)),
+    # strive only on own specialties under own standard, ignoring esteemed peers' standards
+    "peer_standards_ignored": lambda d: replace(d, policy=replace(d.policy, specialty_focus=1.0)),
+    # sit exams of random units instead of the ones it esteems
+    "attention_random": lambda d: replace(d, policy=replace(d.policy, explore=1.0)),
+    # specialise where the absolute score is highest, ignoring peers and crowding
+    "niche_off": lambda d: replace(d, policy=replace(d.policy, niche=0.0, crowd_aversion=0.0)),
+    # copy designs published by esteemed peers (or stop doing so)
+    "design_copying_flipped": lambda d: replace(d, policy=replace(d.policy, adopt_designs=not d.policy.adopt_designs)),
+    # accept a design change on one development set instead of two (or the reverse)
+    "replication_flipped": lambda d: replace(d, policy=replace(d.policy, replicate=not d.policy.replicate)),
+    # start from random designs instead of a covering set of specialists (or the reverse)
+    "initial_designs_flipped": lambda d: replace(d, init="random" if d.init == "covering" else "covering"),
+    # report the mean of the society's estimate instead of the loss-optimal number
+    "estimate_unshaded": lambda d: replace(d, shade=0.0),
 }
 
 

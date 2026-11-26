@@ -215,8 +215,8 @@ examinee                                   examiner
 
 `actors/protocol.py: verify_result` is the check anyone can run on a published result. It establishes that
 the grade recomputes from the revealed keys, that the exam regenerates from the revealed seed under the
-standard named in the receipt, that this standard is the examiner's published one, and that the calibration
-loss follows from the stated self-estimate and score. Exam seeds are derived one-way from the examiner's
+standard named in the receipt, that this standard is the one the examiner had published when it made the
+offer, and that the calibration loss follows from the stated self-estimate and score. Exam seeds are derived one-way from the examiner's
 private seed, so revealing one says nothing about the next.
 
 The examinee commits to its self-estimate before any grade exists, and the examiner commits to the grade
@@ -229,7 +229,7 @@ between peers, claiming too much costs four times what claiming too little does.
 |---|---|---|
 | Mark a rival down | the examinee recomputes every result it receives; a mismatch is published with pointers to the evidence, and every reader re-checks the accusation itself before acting on it | test: the deflator is confirmed, its reputation is 0, honest units stop attending to it |
 | Grade yourself by different rules | there is one module; self-belief and exams run the same function under the same published standard, and receipts carry the evaluator fingerprint | test: a published result equals a direct evaluation of the same answers |
-| Give a rival a harder paper, or a different standard | each result reveals the exam's one-way seed; anyone regenerates the exam under the standard named in the receipt and compares it with what was handed out, and checks that standard against the examiner's latest published profile | test: a unit that rigs exams for non-allies is confirmed as a cheat |
+| Give a rival a harder paper, or a different standard | each result reveals the exam's one-way seed; anyone regenerates the exam under the standard named in the receipt and compares it with what was handed out, and checks that standard against the profile the examiner had published when it offered the exam | tests: a unit that rigs exams for non-allies, and one that grades rivals under a harsher standard than it published, are both confirmed as cheats |
 | Adjust a grade after seeing the claim, or a claim after seeing the grade | commit–reveal in both directions | test: every finished exam has the six posts in order |
 | Over-claim | calibration loss lowers esteem | test: a unit that always claims 1.0 loses about half its esteem |
 | Accuse falsely | accusations are recomputed; a false one costs the accuser its integrity | code path in `_check_accusation` |

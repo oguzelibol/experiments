@@ -116,6 +116,23 @@ def is_abstention(text: str) -> bool:
     return bool(_ABSTAIN_RE.search(_APOSTROPHES.sub("'", text)))
 
 
+_GUESS_AFTER_DECLINING = re.compile(
+    r"\b(best guess|my guess|i(?:'d| would)? guess|probably|maybe|perhaps|might be|could be|i think|"
+    r"i believe|likely|possibly|if i had to)\b",
+    re.I,
+)
+
+
+def is_clean_abstention(text: str) -> bool:
+    """True if the response declines *and does not then offer an answer anyway*.
+
+    "I don't know, but my guess is X" is a guess.  Counting it as declining
+    would let one template collect credit on answerable and unanswerable
+    questions alike.
+    """
+    return is_abstention(text) and not _GUESS_AFTER_DECLINING.search(_APOSTROPHES.sub("'", text or ""))
+
+
 def is_hedged(text: str) -> bool:
     return bool(_HEDGE_RE.search(text or ""))
 

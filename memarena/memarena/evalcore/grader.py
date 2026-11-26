@@ -21,7 +21,7 @@ from ..util import hash_obj, merkle_root
 from . import metrics
 from .criteria import JUDGE_SCORERS, STRING_SCORERS, CriteriaFamily, Criterion, aggregate
 from .judges import HeuristicJudge, Judge
-from .normalize import is_abstention, tokens
+from .normalize import is_clean_abstention, tokens
 
 __all__ = ["ItemGrade", "GradeReport", "Grader", "default_judges", "answers_hash"]
 
@@ -192,7 +192,7 @@ class Grader:
         if status in _NOT_ANSWERED:
             text = ""  # nothing to grade; never score an error message as an answer
         golds = (key.answer,) + tuple(key.aliases)
-        abstained = is_abstention(text)
+        abstained = is_clean_abstention(text)
         base: dict[str, float] = {}
         literal: dict[str, float] = {}
         errors: list[str] = []

@@ -34,7 +34,7 @@ from typing import Any, Mapping, Protocol
 from ..benchmark.schema import AnswerKey
 from ..util import hash_obj
 from . import metrics
-from .normalize import is_abstention, is_echo, is_hedged, is_noncommittal, numbers_in, tokens
+from .normalize import is_abstention, is_clean_abstention, is_echo, is_hedged, is_noncommittal, numbers_in, tokens
 
 __all__ = [
     "JUDGE_MODES",
@@ -46,6 +46,13 @@ __all__ = [
 ]
 
 JUDGE_MODES = ("lenient", "strict", "generous", "graded")
+
+# Longest response (in normalised tokens) a heuristic judge will read as an
+# answer.  Measured on LongMemEval's oracle split, pasting the user's turns back
+# scores 36% under raw containment; with these limits it scores about 1% under
+# the lenient judge and below 1% under the strict one.  Answers that reason at
+# length need the LLM judge, which can tell working from a dump.
+_DUMP_LIMIT = {"lenient": 100, "graded": 100, "strict": 80}
 
 # A response speaks to the user ("your passport"); the reference is written from
 # the user's side ("my passport").  Judges compare after folding perspective.
@@ -139,7 +146,7 @@ class HeuristicJudge:
         self.name = f"heuristic-{mode}"
 
     def spec(self) -> dict:
-        return {"kind": "heuristic", "mode": self.mode, "version": 3}
+        return {"kind": "heuristic", "mode": self.mode, "version": 4}
 
     def judge(self, question: str, key: AnswerKey, response: str) -> JudgeVerdict:
         response = response or ""
@@ -172,8 +179,12 @@ class HeuristicJudge:
         mode = self.mode
         abstained = is_abstention(response)
         if key.is_abstention:
-            return 1.0 if abstained else 0.0
+            return 1.0 if is_clean_abstention(response) else 0.0
         if not response.strip():
+            return 0.0
+        # A response that reproduces a large part of the history contains every
+        # extractive answer without having answered anything.
+        if mode != "generous" and len(tokens(response)) > _DUMP_LIMIT[mode]:
             return 0.0
         if mode != "generous" and is_noncommittal(response):
             return 0.0  # several alternatives offered instead of an answer

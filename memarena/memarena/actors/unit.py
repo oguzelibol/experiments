@@ -451,7 +451,7 @@ class Unit:
         self._set[xid] = {"examinee": post.author, "exam": exam, "salt": salt, "probes": probes_blob, "seed": exam_seed}
         from ..evalcore.module import keys_commitment
 
-        self._post(
+        offer = self._post(
             "exam.offer",
             {
                 "xid": xid, "probes": probes_blob, "n": len(exam),
@@ -461,6 +461,7 @@ class Unit:
             },
             to=post.author,
         )
+        self._set[xid]["offer_seq"] = offer.seq
 
     def _on_offer(self, post) -> None:
         xid = post.body.get("xid")
@@ -529,6 +530,7 @@ class Unit:
                 "probes": st["probes"], "answers": st["answers_blob"], "keys": keys_blob,
                 "salt": st["salt"], "nonce": st["nonce"],
                 "exam_seed": st["seed"], "exam_size": [self.rules.exam_streams, self.rules.exam_questions],
+                "offer_seq": st["offer_seq"],
             },
             to=post.author,
         )
