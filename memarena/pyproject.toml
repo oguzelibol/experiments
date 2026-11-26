@@ -1,0 +1,16 @@
+[project]
+name = "memarena"
+version = "0.1.0"
+description = "Peer-examined long-term-memory modules with a verifiable evaluation pipeline"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+llm = ["anthropic>=1.0"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["memarena*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
