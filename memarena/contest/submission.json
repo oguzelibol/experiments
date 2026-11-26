@@ -1,0 +1,394 @@
+{
+  "arms": {
+    "ablation:attention_random": {
+      "chosen_minus_arm": 0.004399082965802555,
+      "chosen_minus_arm_ci95": [
+        -0.0427522049804221,
+        0.05155037091202721
+      ],
+      "ci95": [
+        0.6279301014988896,
+        0.7196969225375793
+      ],
+      "design_hash": "071d373c0be3a94f",
+      "mean": 0.6738135120182345,
+      "metrics_mean": {
+        "adoptions": 10.375,
+        "audit_fails": 0.0,
+        "best_single_true": 0.6060474369681109,
+        "champion_regret": 0.028863946276933183,
+        "esteem_validity": 0.39566716230779647,
+        "estimate_error": 0.020495460490293292,
+        "estimate_loss": 0.0048050148787654665,
+        "estimate_report": 0.718334046902355,
+        "exchanges": 156.9375,
+        "mean_peer_loss": 0.009296384360199248,
+        "mean_true_first": 0.47486258115214885,
+        "mean_true_last": 0.5325863180898671,
+        "outside_score": 0.6978385864120618,
+        "reputation_validity": 0.18321477927152757
+      }
+    },
+    "ablation:design_copying_flipped": {
+      "chosen_minus_arm": -0.06711935624667209,
+      "chosen_minus_arm_ci95": [
+        -0.11106416394814861,
+        -0.023174548545195572
+      ],
+      "ci95": [
+        0.7167957807168391,
+        0.773868121744579
+      ],
+      "design_hash": "d1fe166727d2323a",
+      "mean": 0.7453319512307091,
+      "metrics_mean": {
+        "adoptions": 6.8125,
+        "audit_fails": 0.0,
+        "best_single_true": 0.6156890966696337,
+        "champion_regret": 0.02620036300494451,
+        "esteem_validity": 0.4831826824133289,
+        "estimate_error": -0.03388542231359284,
+        "estimate_loss": 0.007514632491609125,
+        "estimate_report": 0.7490196913751619,
+        "exchanges": 157.0,
+        "mean_peer_loss": 0.008439539808917198,
+        "mean_true_first": 0.47350819158833757,
+        "mean_true_last": 0.5063377122603747,
+        "outside_score": 0.7829051136887547,
+        "reputation_validity": 0.4557104702707019
+      }
+    },
+    "ablation:estimate_unshaded": {
+      "chosen_minus_arm": 0.011910179729690246,
+      "chosen_minus_arm_ci95": [
+        -0.003717642875725548,
+        0.02753800233510604
+      ],
+      "ci95": [
+        0.6455951799758153,
+        0.6870096505328782
+      ],
+      "design_hash": "f235aa0f51d64145",
+      "mean": 0.6663024152543467,
+      "metrics_mean": {
+        "adoptions": 11.9375,
+        "audit_fails": 0.0,
+        "best_single_true": 0.6002114494366043,
+        "champion_regret": 0.0334697910605881,
+        "esteem_validity": 0.370287045206136,
+        "estimate_error": -0.022185022821179505,
+        "estimate_loss": 0.005478189577923745,
+        "estimate_report": 0.671508340322786,
+        "exchanges": 156.9375,
+        "mean_peer_loss": 0.009186237370876205,
+        "mean_true_first": 0.47486258115214885,
+        "mean_true_last": 0.5325868224189271,
+        "outside_score": 0.6936933631439655,
+        "reputation_validity": 0.12889577362913943
+      }
+    },
+    "ablation:initial_designs_flipped": {
+      "chosen_minus_arm": 0.0071058710175916605,
+      "chosen_minus_arm_ci95": [
+        -0.05212359866774886,
+        0.06633534070293219
+      ],
+      "ci95": [
+        0.622347311158209,
+        0.7198661367746817
+      ],
+      "design_hash": "6b62c5a19248c240",
+      "mean": 0.6711067239664453,
+      "metrics_mean": {
+        "adoptions": 17.4375,
+        "audit_fails": 0.375,
+        "best_single_true": 0.6246404948635012,
+        "champion_regret": 0.04012710180075165,
+        "esteem_validity": 0.30221048798306605,
+        "estimate_error": 0.04535950732388369,
+        "estimate_loss": 0.0039949231985444405,
+        "estimate_report": 0.7364408472830513,
+        "exchanges": 156.9375,
+        "mean_peer_loss": 0.008746407191634003,
+        "mean_true_first": 0.45318904856705955,
+        "mean_true_last": 0.5515768212796632,
+        "outside_score": 0.6910813399591675,
+        "reputation_validity": 0.15082039936387281
+      }
+    },
+    "ablation:niche_off": {
+      "chosen_minus_arm": 0.08999746283471667,
+      "chosen_minus_arm_ci95": [
+        0.040519326782087396,
+        0.13947559888734595
+      ],
+      "ci95": [
+        0.5417935478094624,
+        0.6346367164891782
+      ],
+      "design_hash": "a582403d8791a284",
+      "mean": 0.5882151321493203,
+      "metrics_mean": {
+        "adoptions": 11.5,
+        "audit_fails": 0.0,
+        "best_single_true": 0.5802924730957337,
+        "champion_regret": 0.04872338448829791,
+        "esteem_validity": 0.3180381392379009,
+        "estimate_error": 0.07113468122690214,
+        "estimate_loss": 0.004315898281468013,
+        "estimate_report": 0.6809293047835625,
+        "exchanges": 156.9375,
+        "mean_peer_loss": 0.009635490749530459,
+        "mean_true_first": 0.47486258115214885,
+        "mean_true_last": 0.5159725781043397,
+        "outside_score": 0.6097946235566604,
+        "reputation_validity": 0.09049030514975956
+      }
+    },
+    "ablation:peer_standards_ignored": {
+      "chosen_minus_arm": -0.05826581203447428,
+      "chosen_minus_arm_ci95": [
+        -0.1073839230032565,
+        -0.009147701065692064
+      ],
+      "ci95": [
+        0.695388464397831,
+        0.7775683496391916
+      ],
+      "design_hash": "cb98e16d0620c10c",
+      "mean": 0.7364784070185113,
+      "metrics_mean": {
+        "adoptions": 4.8125,
+        "audit_fails": 0.0,
+        "best_single_true": 0.5829904580261446,
+        "champion_regret": 0.05164453890603945,
+        "esteem_validity": 0.5002489518642163,
+        "estimate_error": -0.01643843064958092,
+        "estimate_loss": 0.006651721550937276,
+        "estimate_report": 0.7532985841236167,
+        "exchanges": 157.0,
+        "mean_peer_loss": 0.007749769904458598,
+        "mean_true_first": 0.47024897701048074,
+        "mean_true_last": 0.4693976229162031,
+        "outside_score": 0.7697370147731977,
+        "reputation_validity": 0.39251826737286727
+      }
+    },
+    "ablation:replication_flipped": {
+      "chosen_minus_arm": 0.03298487947399134,
+      "chosen_minus_arm_ci95": [
+        -0.0017958393763034541,
+        0.06776559832428614
+      ],
+      "ci95": [
+        0.6126197836228725,
+        0.6778356473972188
+      ],
+      "design_hash": "97e8fd413043f80a",
+      "mean": 0.6452277155100457,
+      "metrics_mean": {
+        "adoptions": 16.5,
+        "audit_fails": 0.0,
+        "best_single_true": 0.605726238431023,
+        "champion_regret": 0.03666701640470401,
+        "esteem_validity": 0.333388275139913,
+        "estimate_error": 0.05549066630458456,
+        "estimate_loss": 0.002876171110913962,
+        "estimate_report": 0.7150992373692,
+        "exchanges": 156.875,
+        "mean_peer_loss": 0.010063909125939083,
+        "mean_true_first": 0.47627900382431604,
+        "mean_true_last": 0.5497495816527135,
+        "outside_score": 0.6596085710646155,
+        "reputation_validity": 0.08857466736981474
+      }
+    },
+    "ablation:striving_off": {
+      "chosen_minus_arm": -0.10200823156464164,
+      "chosen_minus_arm_ci95": [
+        -0.13499770051053306,
+        -0.06901876261875023
+      ],
+      "ci95": [
+        0.7614793693899529,
+        0.7989622837074044
+      ],
+      "design_hash": "42259a48604ba548",
+      "mean": 0.7802208265486786,
+      "metrics_mean": {
+        "adoptions": 0.0,
+        "audit_fails": 0.0,
+        "best_single_true": 0.588571646574375,
+        "champion_regret": 0.007272079772079773,
+        "esteem_validity": 0.506874731431601,
+        "estimate_error": -0.02122846826512266,
+        "estimate_loss": 0.003599146320896208,
+        "estimate_report": 0.776988089888037,
+        "exchanges": 157.0,
+        "mean_peer_loss": 0.007558669984076433,
+        "mean_true_first": 0.4714916851074477,
+        "mean_true_last": 0.4714916851074477,
+        "outside_score": 0.7982165581531597,
+        "reputation_validity": 0.4267457145599138
+      }
+    },
+    "baseline:default": {
+      "chosen_minus_arm": 0.03199030756674774,
+      "chosen_minus_arm_ci95": [
+        -0.02991136968064824,
+        0.09389198481414372
+      ],
+      "ci95": [
+        0.5860380130140597,
+        0.7064065618205189
+      ],
+      "design_hash": "f944f23d5c712485",
+      "mean": 0.6462222874172893,
+      "metrics_mean": {
+        "adoptions": 18.75,
+        "audit_fails": 0.375,
+        "best_single_true": 0.6385868942428848,
+        "champion_regret": 0.06730691002244431,
+        "esteem_validity": 0.3299123378293203,
+        "estimate_error": 0.06358157434363701,
+        "estimate_loss": 0.004084119389303884,
+        "estimate_report": 0.7302244587074457,
+        "exchanges": 157.0,
+        "mean_peer_loss": 0.009303025477707007,
+        "mean_true_first": 0.4519641350374585,
+        "mean_true_last": 0.548092272718154,
+        "outside_score": 0.6666428843638087,
+        "reputation_validity": 0.058416840045256824
+      }
+    },
+    "baseline:default_covering": {
+      "chosen_minus_arm": 0.009895730480721093,
+      "chosen_minus_arm_ci95": [
+        -0.02449166398081011,
+        0.0442831249422523
+      ],
+      "ci95": [
+        0.6262655449276736,
+        0.7103681840789583
+      ],
+      "design_hash": "81dd4da448bd048d",
+      "mean": 0.668316864503316,
+      "metrics_mean": {
+        "adoptions": 12.75,
+        "audit_fails": 0.0,
+        "best_single_true": 0.608461013230925,
+        "champion_regret": 0.03421665399801365,
+        "esteem_validity": 0.36281076442423804,
+        "estimate_error": 0.031518413178286006,
+        "estimate_loss": 0.003359634862022574,
+        "estimate_report": 0.7166334519917148,
+        "exchanges": 157.0,
+        "mean_peer_loss": 0.00935007882165605,
+        "mean_true_first": 0.4749276853188155,
+        "mean_true_last": 0.5407698136277326,
+        "outside_score": 0.6851150388134287,
+        "reputation_validity": 0.07799763574716065
+      }
+    },
+    "chosen": {
+      "chosen_minus_arm": 0.0,
+      "chosen_minus_arm_ci95": [
+        0.0,
+        0.0
+      ],
+      "ci95": [
+        0.6538631586510436,
+        0.7025620313170303
+      ],
+      "design_hash": "3f6d8bbea14eed5c",
+      "mean": 0.678212594984037,
+      "metrics_mean": {
+        "adoptions": 11.9375,
+        "audit_fails": 0.0,
+        "best_single_true": 0.6002114494366043,
+        "champion_regret": 0.0334697910605881,
+        "esteem_validity": 0.370287045206136,
+        "estimate_error": 0.031045563097503226,
+        "estimate_loss": 0.0030961536319856976,
+        "estimate_report": 0.7247389262414687,
+        "exchanges": 156.9375,
+        "mean_peer_loss": 0.009186237370876205,
+        "mean_true_first": 0.47486258115214885,
+        "mean_true_last": 0.5325868224189271,
+        "outside_score": 0.6936933631439655,
+        "reputation_validity": 0.12889577362913943
+      }
+    }
+  },
+  "claimed_value": 0.678212594984037,
+  "claimed_value_ci95": [
+    0.6538631586510436,
+    0.7025620313170303
+  ],
+  "design": {
+    "criterion_plan": "prior",
+    "init": "covering",
+    "n_units": 8,
+    "policy": {
+      "adopt_designs": true,
+      "attention_k": 4,
+      "audit_rate": 0.25,
+      "calibration_weight": 4.0,
+      "conformity": 0.0,
+      "crowd_aversion": 0.2,
+      "dev_streams": 5,
+      "esteem_sharpness": 4.0,
+      "exams_per_round": 2,
+      "explore": 0.25,
+      "guess_shade": 1.0,
+      "half_life": 3.0,
+      "holdout_streams": 8,
+      "min_gain": 0.02,
+      "niche": 0.5,
+      "prior_strength": 12.0,
+      "replicate": true,
+      "scan": 2,
+      "second_hand": 0.0,
+      "serve_capacity": 6,
+      "share_design": true,
+      "specialty_count": 3,
+      "specialty_focus": 0.5,
+      "trials_per_round": 2
+    },
+    "shade": 1.0
+  },
+  "design_hash": "3f6d8bbea14eed5c",
+  "designer": "designer-A",
+  "heldout_metrics": {
+    "adoptions": 11.9375,
+    "audit_fails": 0.0,
+    "best_single_true": 0.6002114494366043,
+    "champion_regret": 0.0334697910605881,
+    "esteem_validity": 0.370287045206136,
+    "estimate_error": 0.031045563097503226,
+    "estimate_loss": 0.0030961536319856976,
+    "estimate_report": 0.7247389262414687,
+    "exchanges": 156.9375,
+    "mean_peer_loss": 0.009186237370876205,
+    "mean_true_first": 0.47486258115214885,
+    "mean_true_last": 0.5325868224189271,
+    "outside_score": 0.6936933631439655,
+    "reputation_validity": 0.12889577362913943
+  },
+  "heldout_worlds": 16,
+  "notebook_entries": 123,
+  "notebook_head": "13fc84f9ac6b4eb789bef29f71a32d5792f74fa133f493676aee55d36d8b62f6",
+  "reproduce": "python scripts/verify_contest.py contest",
+  "rounds": 10,
+  "self_verification": {
+    "chain_ok": true,
+    "entries": 123,
+    "evaluator_code_now": "c61a38c951e69a42f33d795a",
+    "evaluator_code_recorded": "c61a38c951e69a42f33d795a",
+    "ok": true,
+    "problems": [],
+    "rerun": 9
+  },
+  "simulations_run": 392,
+  "wall_seconds": 955.7
+}
