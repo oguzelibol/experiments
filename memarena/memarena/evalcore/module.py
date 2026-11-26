@@ -16,6 +16,7 @@ particular examinee does not survive that check.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,6 +35,7 @@ __all__ = [
     "CapabilityTable",
     "code_hash",
     "keys_commitment",
+    "recompute_receipt",
     "verify_receipt",
     "expected_score",
 ]
@@ -132,8 +134,12 @@ def expected_score(
     gives each question type equal weight; unanswerable items are folded in or
     left out according to the criterion's abstention policy.
     """
-    abst_share = capability_weights.get("abstention", 0.0)
-    type_mass = sum(capability_weights.get(t, 0.0) for t in QUESTION_TYPES)
+    total_mass = sum(max(0.0, float(v)) for v in capability_weights.values())
+    if total_mass <= 0:
+        return 0.0
+    # the abstention weight is a share of the exam, so it only means something after normalising
+    abst_share = max(0.0, float(capability_weights.get("abstention", 0.0))) / total_mass
+    type_mass = sum(max(0.0, float(capability_weights.get(t, 0.0))) for t in QUESTION_TYPES)
     type_mix = (
         {t: capability_weights.get(t, 0.0) / type_mass for t in QUESTION_TYPES}
         if type_mass > 0 else {t: 1.0 / len(QUESTION_TYPES) for t in QUESTION_TYPES}
@@ -223,6 +229,58 @@ class EvaluationModule:
         return Evaluation(report, score, capability, table, receipt)
 
 
+def _finite(x) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(float(x))
+
+
+def recompute_receipt(
+    receipt: Mapping,
+    answers: Mapping[str, Answer],
+    instances: Sequence[Instance],
+    salt: str,
+    family: CriteriaFamily | None = None,
+    judges: Mapping[str, Judge] | None = None,
+    tolerance: float = 1e-6,
+) -> tuple[bool, str, dict]:
+    """Recompute an evaluation from keys and answers and compare it with its receipt.
+
+    Returns (ok, reason, recomputed receipt).  Every field of the receipt is
+    compared; a number that is NaN or infinite never compares equal, so it
+    cannot be used to switch a check off.  Callers should use the recomputed
+    values afterwards, not the claimed ones.
+    """
+    try:
+        standard = Standard.from_dict(receipt["standard"])
+        module = EvaluationModule(standard, family, judges)
+    except (KeyError, ValueError, TypeError) as exc:
+        return False, f"malformed receipt: {exc}", {}
+    if keys_commitment(instances, salt) != receipt.get("keys_commit"):
+        return False, "revealed keys do not match the commitment", {}
+    fresh = dict(module.evaluate(answers, instances, salt).receipt)
+    if fresh["evaluator"] != receipt.get("evaluator"):
+        return False, "evaluator fingerprint mismatch (different grading code, judges or standard)", fresh
+    if fresh["subject"] != receipt.get("subject"):
+        return False, "answers differ from the ones that were graded", fresh
+    if fresh["items_root"] != receipt.get("items_root"):
+        return False, "per-item grading records differ", fresh
+    if receipt.get("n_items") != fresh["n_items"] or receipt.get("not_answered") != fresh["not_answered"]:
+        return False, "item counts differ", fresh
+    claimed_score = receipt.get("score")
+    if not _finite(claimed_score) or abs(fresh["score"] - float(claimed_score)) > tolerance:
+        return False, f"score differs: recomputed {fresh['score']:.6f}, claimed {claimed_score!r}", fresh
+    claimed_cap = receipt.get("capability")
+    if not isinstance(claimed_cap, Mapping) or set(claimed_cap) != set(fresh["capability"]):
+        return False, "receipt does not list exactly the abilities that were examined", fresh
+    for cap, (s, n) in fresh["capability"].items():
+        got = claimed_cap[cap]
+        if (
+            not isinstance(got, (list, tuple)) or len(got) != 2 or not _finite(got[0])
+            or abs(float(got[0]) - s) > tolerance or got[1] != n
+        ):
+            return False, f"capability score differs for {cap}", fresh
+    return True, "ok", fresh
+
+
 def verify_receipt(
     receipt: Mapping,
     answers: Mapping[str, Answer],
@@ -232,32 +290,6 @@ def verify_receipt(
     judges: Mapping[str, Judge] | None = None,
     tolerance: float = 1e-6,
 ) -> tuple[bool, str]:
-    """Recompute an evaluation from revealed keys and compare it with its receipt.
-
-    Returns (ok, reason).  With deterministic judges the comparison is exact
-    (scores are compared within ``tolerance`` only to absorb float printing).
-    """
-    try:
-        standard = Standard.from_dict(receipt["standard"])
-        module = EvaluationModule(standard, family, judges)
-    except (KeyError, ValueError) as exc:
-        return False, f"malformed receipt: {exc}"
-    if keys_commitment(instances, salt) != receipt.get("keys_commit"):
-        return False, "revealed keys do not match the commitment"
-    fresh = module.evaluate(answers, instances, salt).receipt
-    if fresh["evaluator"] != receipt.get("evaluator"):
-        return False, "evaluator fingerprint mismatch (different grading code, judges or standard)"
-    if fresh["subject"] != receipt.get("subject"):
-        return False, "answers differ from the ones that were graded"
-    if fresh["items_root"] != receipt.get("items_root"):
-        return False, "per-item grading records differ"
-    if abs(fresh["score"] - float(receipt.get("score", -1))) > tolerance:
-        return False, f"score differs: recomputed {fresh['score']:.6f}, claimed {float(receipt.get('score', -1)):.6f}"
-    claimed_cap = receipt.get("capability", {})
-    for cap, (s, n) in fresh["capability"].items():
-        got = claimed_cap.get(cap)
-        if got is None or abs(float(got[0]) - s) > tolerance or int(got[1]) != n:
-            return False, f"capability score differs for {cap}"
-    if set(claimed_cap) - set(fresh["capability"]):
-        return False, "receipt reports capabilities that were not examined"
-    return True, "ok"
+    """(ok, reason): does this receipt recompute from these keys and answers?"""
+    ok, why, _fresh = recompute_receipt(receipt, answers, instances, salt, family, judges, tolerance)
+    return ok, why

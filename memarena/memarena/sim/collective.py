@@ -24,13 +24,13 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from ..actors.protocol import verify_result
+from ..actors.protocol import check_result, verify_result
 from ..evalcore.calibration import EXTERNAL_LOSS, AsymmetricLoss
 from ..evalcore.criteria import CriteriaFamily
 from ..util import sha256_hex
 
 __all__ = [
-    "Signal", "gather_signals", "confirmed_cheats", "reputation", "consensus",
+    "Signal", "gather_signals", "audit_board", "confirmed_cheats", "reputation", "consensus",
     "CLASS_CAPABILITIES", "select_champions", "collective_estimate", "verify_result_post",
 ]
 
@@ -59,29 +59,63 @@ class Signal:
 
 def verify_result_post(board: Any, post: Any, family: CriteriaFamily) -> tuple[bool, str]:
     """Check one ``exam.result`` post against its public evidence."""
-    return verify_result(board, post.body, family, examiner=post.author, result_seq=post.seq)
+    return verify_result(board, post, family)
+
+
+def _signal(post: Any) -> Signal | None:
+    b = post.body
+    try:
+        return Signal(
+            xid=b["xid"], examiner=post.author, examinee=b["examinee"], score=float(b["score"]),
+            n=int(b["receipt"]["n_items"]),
+            capability={c: (float(s), int(n)) for c, (s, n) in b["capability"].items()},
+            round=post.round, loss=float(b.get("loss", 0.0)), seq=post.seq,
+        )
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
 
 
 def gather_signals(board: Any) -> list[Signal]:
-    out = []
+    """Every published result, as posted and NOT verified.  Only for counting activity."""
+    return [s for s in (_signal(p) for p in board.read(0, kinds=["exam.result"])) if s is not None]
+
+
+def audit_board(board: Any, family: CriteriaFamily, cache: dict | None = None) -> tuple[list[Signal], set[str], set[int]]:
+    """Verify every published result before anything is built on it.
+
+    Returns (signals, examiners with at least one result that does not verify,
+    the seqs of those results).  Each signal carries the numbers recomputed
+    here, never the ones written in the post.  A second result for an exam that
+    already has one is dropped, so nothing is counted twice.  ``cache``
+    (seq -> Verdict) lets repeated calls skip results already checked.
+    """
+    cache = cache if cache is not None else {}
+    signals: list[Signal] = []
+    cheats: set[str] = set()
+    bad: set[int] = set()
+    seen: set[tuple[str, str]] = set()
     for post in board.read(0, kinds=["exam.result"]):
-        b = post.body
-        try:
-            out.append(
-                Signal(
-                    xid=b["xid"], examiner=post.author, examinee=b["examinee"], score=float(b["score"]),
-                    n=int(b["receipt"]["n_items"]),
-                    capability={c: (float(s), int(n)) for c, (s, n) in b["capability"].items()},
-                    round=post.round, loss=float(b.get("loss", 0.0)), seq=post.seq,
-                )
-            )
-        except (KeyError, TypeError, ValueError):
+        verdict = cache.get(post.seq)
+        if verdict is None:
+            verdict = cache[post.seq] = check_result(board, post, family)
+        if not verdict.ok:
+            cheats.add(post.author)
+            bad.add(post.seq)
             continue
-    return out
+        if (verdict.examiner, verdict.xid) in seen:
+            continue
+        seen.add((verdict.examiner, verdict.xid))
+        signals.append(
+            Signal(
+                xid=verdict.xid, examiner=verdict.examiner, examinee=verdict.examinee, score=verdict.score,
+                n=verdict.n_items, capability=dict(verdict.capability), round=post.round, loss=verdict.loss, seq=post.seq,
+            )
+        )
+    return signals, cheats, bad
 
 
 def confirmed_cheats(board: Any, family: CriteriaFamily) -> tuple[set[str], set[int]]:
-    """Examiners with at least one result that fails re-computation, and those results' seqs.
+    """Examiners accused on the board whose accused result really fails verification.
 
     Accusations are never taken on trust: each one is recomputed here.
     """
@@ -92,7 +126,7 @@ def confirmed_cheats(board: Any, family: CriteriaFamily) -> tuple[set[str], set[
         try:
             seq = int(post.body["result_seq"])
             target = board.read(since_seq=seq - 1, limit=1)[0]
-        except (KeyError, ValueError, IndexError):
+        except (KeyError, ValueError, TypeError, IndexError):
             continue
         if target.kind != "exam.result":
             continue
@@ -106,45 +140,53 @@ def confirmed_cheats(board: Any, family: CriteriaFamily) -> tuple[set[str], set[
 
 def reputation(
     signals: Sequence[Signal], units: Sequence[str], banned: set[str] = frozenset(),
-    damping: float = 0.85, iterations: int = 30, seeds: Sequence[str] | None = None,
+    damping: float = 0.85, iterations: int = 60, seeds: Sequence[str] | None = None,
 ) -> dict[str, float]:
     """Reputation as examiner-weighted performance (damped power iteration).
+
+    An examiner passes its reputation on to the units it examined in
+    proportion to the *level* of the scores it gave them: a unit that scored
+    0.05 receives a twentieth of what a unit that scored 1.0 would.  Whatever an
+    examiner does not pass on returns to the seeds.  (Normalising each
+    examiner's row instead would cancel the level of its grades, and a unit
+    examined only by examiners who saw nobody else would look excellent however
+    badly it did.)
 
     ``seeds`` are the units whose judgement is trusted to begin with (for a
     designer: the units it built).  Reputation restarts from the seeds only, so
     a ring of outsiders praising each other gains nothing unless seeded units
-    measure them as good first-hand.
+    measure them as good first-hand.  A unit's opinion of itself is ignored.
     """
     units = [u for u in units]
     live = [u for u in units if u not in banned]
     if not live:
         return {u: 0.0 for u in units}
-    seed_set = [u for u in (seeds if seeds is not None else live) if u in live] or live
+    live_set = set(live)
+    seed_set = [u for u in (seeds if seeds is not None else live) if u in live_set] or live
     pooled: dict[tuple[str, str], list[float]] = {}
     for s in signals:
-        if s.examiner in banned or s.examinee in banned:
+        if s.examiner == s.examinee or s.examiner not in live_set or s.examinee not in live_set or s.n <= 0:
             continue
         acc = pooled.setdefault((s.examiner, s.examinee), [0.0, 0.0])
-        acc[0] += s.score * s.n
+        acc[0] += min(1.0, max(0.0, s.score)) * s.n
         acc[1] += s.n
-    live_set = set(live)  # units that have since left the society no longer carry reputation
-    trust = {k: a[0] / a[1] for k, a in pooled.items() if a[1] > 0 and k[0] in live_set and k[1] in live_set}
-    row_sum: dict[str, float] = {}
-    for (i, _j), t in trust.items():
-        row_sum[i] = row_sum.get(i, 0.0) + t
+    examined: dict[str, int] = {}
+    for (i, _j) in pooled:
+        examined[i] = examined.get(i, 0) + 1
+    # share of examiner i's reputation that flows to examinee j
+    flow = {(i, j): (a[0] / a[1]) / examined[i] for (i, j), a in pooled.items()}
     restart = {u: (1.0 / len(seed_set) if u in seed_set else 0.0) for u in live}
     rep = dict(restart)
     for _ in range(iterations):
         nxt = {u: (1.0 - damping) * restart[u] for u in live}
-        dangling = 0.0
-        for i in live:
-            if row_sum.get(i, 0.0) <= 0:
-                dangling += rep[i]
-        for (i, j), t in trust.items():
-            if row_sum[i] > 0:
-                nxt[j] += damping * rep[i] * t / row_sum[i]
+        passed: dict[str, float] = {}
+        for (i, j), share in flow.items():
+            amount = damping * rep[i] * share
+            nxt[j] += amount
+            passed[i] = passed.get(i, 0.0) + amount
+        returned = sum(damping * rep[i] - passed.get(i, 0.0) for i in live)
         for u in live:
-            nxt[u] += damping * dangling * restart[u]
+            nxt[u] += returned * restart[u]
         total = sum(nxt.values())
         rep = {u: v / total for u, v in nxt.items()}
     out = {u: 0.0 for u in units}

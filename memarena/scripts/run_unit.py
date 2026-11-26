@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,7 +32,9 @@ def main() -> int:
     ap.add_argument("--owner", default="designer")
     ap.add_argument("--features", default="expansion,recency,third_party,negation,comparative")
     ap.add_argument("--criterion", default="judge_lenient|detect|micro")
-    ap.add_argument("--seed", default="0")
+    ap.add_argument("--seed", default=None,
+                    help="the unit's private seed; exam papers and commitments derive from it. "
+                         "Default: 32 random bytes. Never share it and never reuse a guessable value")
     ap.add_argument("--brain", choices=["policy", "llm"], default="policy")
     ap.add_argument("--model", default="claude-opus-5-5")
     ap.add_argument("--max-seconds", type=float, default=None)
@@ -46,7 +49,7 @@ def main() -> int:
     spec = UnitSpec(
         unit_id=args.unit, owner=args.owner, policy=UnitPolicy(),
         memory=MemoryConfig(features=frozenset(f for f in args.features.split(",") if f)),
-        criterion_weights={args.criterion: 1.0}, seed=args.seed,
+        criterion_weights={args.criterion: 1.0}, seed=args.seed or secrets.token_hex(32),
     )
     unit = Unit(spec, BoardClient(args.board, args.token), WorldRules(), brain=brain)
     print(f"{args.unit} following the clock on {args.board} (brain: {args.brain})", flush=True)

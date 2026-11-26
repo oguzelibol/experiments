@@ -5,6 +5,10 @@ their judgments trustworthy and a designer that builds and releases such societi
 
 Measured results are in [RESULTS.md](RESULTS.md). The benchmark survey is in [BENCHMARKS.md](BENCHMARKS.md).
 
+> **Under revision.** Sections 4, 5 and 8 describe the first version. Reviews found it could be cheated and
+> its exam protocol has been replaced (see `memarena/actors/protocol.py` for the current eight-post
+> protocol). This document is being rewritten to match; the README has the current status.
+
 ## 1. The brief, as built
 
 The task is long-term conversational memory: a person says things over many sessions and the system must

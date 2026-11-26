@@ -40,7 +40,7 @@ class Turn:
 @dataclass(frozen=True)
 class Session:
     session_id: str
-    date: str  # ISO "YYYY-MM-DD" where known, else the source string
+    date: str  # ISO "YYYY-MM-DD", or "YYYY-MM-DD HH:MM" when the source gives a time; else the source string
     turns: tuple[Turn, ...]
 
 
@@ -133,10 +133,17 @@ class Instance:
     probe: Probe
     key: AnswerKey
     source_id: str = ""  # id in the source dataset; never shown to a system
+    # Statistical unit this item belongs to: items whose histories overlap share one, and are
+    # kept together by splits and by cluster-robust intervals.  Empty means "its own history".
+    cluster: str = ""
 
     @property
     def probe_id(self) -> str:
         return self.probe.probe_id
+
+    @property
+    def cluster_id(self) -> str:
+        return self.cluster or self.probe.haystack_id
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,10 @@ class Benchmark:
     def by_id(self) -> dict[str, Instance]:
         return {i.probe_id: i for i in self.instances}
 
+    def clusters(self) -> dict[str, str]:
+        """Probe id -> statistical unit.  Use this, not the history id, for intervals and splits."""
+        return {i.probe_id: i.cluster_id for i in self.instances}
+
     def type_counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for i in self.instances:
@@ -230,10 +241,11 @@ class Benchmark:
         )
 
     def split(self, fractions: Mapping[str, float], seed: int | str) -> dict[str, "Benchmark"]:
-        """Random split stratified by (question type, abstention), grouped by haystack.
+        """Random split stratified by (question type, abstention), grouped by cluster.
 
-        Probes that share a haystack stay in the same part, so no history is
-        seen in two parts.  The split never looks at any system's scores.
+        Items whose histories are the same or overlap form one cluster and stay
+        in the same part, so no conversation text is seen in two parts.  The
+        split never looks at any system's scores.
         """
         names = list(fractions)
         total = sum(fractions.values())
@@ -241,7 +253,7 @@ class Benchmark:
             raise ValueError("fractions must sum to a positive number")
         groups: dict[str, list[Instance]] = {}
         for inst in self.instances:
-            groups.setdefault(inst.probe.haystack_id, []).append(inst)
+            groups.setdefault(inst.cluster_id, []).append(inst)
         # stratify groups by their dominant stratum
         strata: dict[str, list[str]] = {}
         for hid, members in groups.items():
@@ -266,7 +278,7 @@ class Benchmark:
                 start = end
         parts: dict[str, list[Instance]] = {p: [] for p in names}
         for inst in self.instances:
-            parts[assignment[inst.probe.haystack_id]].append(inst)
+            parts[assignment[inst.cluster_id]].append(inst)
         return {p: Benchmark(f"{self.name}:{p}", parts[p], self.info) for p in names}
 
 

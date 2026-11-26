@@ -32,8 +32,8 @@ from memarena.evalcore.grader import default_judges  # noqa: E402
 from memarena.evalcore.judges import LLMJudge  # noqa: E402
 from memarena.evalcore.module import EvaluationModule  # noqa: E402
 from memarena.evalcore.standard import Standard  # noqa: E402
-from memarena.evalcore.stats import cluster_mean_se  # noqa: E402
-from memarena.memory.base import run_system  # noqa: E402
+from memarena.evalcore.stats import cluster_mean_se, t_quantile_975  # noqa: E402
+from memarena.memory.base import run_isolated, run_system  # noqa: E402
 from memarena.memory.heuristic import FEATURES, HeuristicMemory, MemoryConfig  # noqa: E402
 
 HEADLINES = (
@@ -60,15 +60,19 @@ def main() -> int:
     ap.add_argument("--votes", type=int, default=1)
     ap.add_argument("--out", default=None)
     ap.add_argument("--skip-audit", action="store_true")
+    ap.add_argument("--salt", default=None,
+                    help="secret that keys probe ids and question order for public benchmarks; default: random per run")
+    ap.add_argument("--isolate", action="store_true",
+                    help="run the (offline) system in a separate interpreter that never holds the answer keys")
     args = ap.parse_args()
 
     if args.benchmark == "synthetic":
         bench = generate(args.seed, GenConfig(n_streams=args.streams))
     elif args.benchmark == "longmemeval":
-        bench = load_longmemeval(args.path, limit=args.limit)
+        bench = load_longmemeval(args.path, limit=args.limit, salt=args.salt)
     else:
-        bench = load_locomo(args.path)
-    if args.limit and args.benchmark != "longmemeval":
+        bench = load_locomo(args.path, limit=args.limit, salt=args.salt)
+    if args.limit and args.benchmark == "synthetic":
         bench = bench.subset([i.probe_id for i in bench.instances[: args.limit]])
 
     llm_totals = {}
@@ -102,7 +106,15 @@ def main() -> int:
     module = EvaluationModule(Standard({"judge_lenient|detect|micro": 1.0}), family, judges)
 
     t0 = time.time()
-    answers = run_system(system, bench.probes())
+    if args.isolate:
+        if args.memory != "heuristic":
+            print("--isolate currently supports the offline system only", file=sys.stderr)
+            return 2
+        import functools
+
+        answers = run_isolated(functools.partial(HeuristicMemory, system.config), bench.probes())
+    else:
+        answers = run_system(system, bench.probes())
     run_seconds = time.time() - t0
     evaluation = module.evaluate(answers, bench.instances, salt="public-benchmark")
     report = evaluation.report
@@ -117,11 +129,14 @@ def main() -> int:
     }
     print(f"\n{bench.name}: {report.n_items} questions, system {system.name}")
     print(f"not answered: {report.n_not_answered}   truncated: {report.n_truncated}   judge errors: {report.n_judge_errors}")
+    cluster_of = bench.clusters()  # questions whose histories overlap count as one unit
     for cid in HEADLINES:
-        rows = [(it.haystack_id, s) for it, inc, s in report.item_scores(cid) if inc]
+        rows = [(cluster_of[it.probe_id], s) for it, inc, s in report.item_scores(cid) if inc]
         mean, se = cluster_mean_se([s for _h, s in rows], [h for h, _s in rows])
-        summary["scores"][cid] = {"score": report.score(cid), "item_mean": mean, "ci95_half_width": 1.96 * se, "n": len(rows)}
-        print(f"  {cid:32} {report.score(cid):.4f}  (item mean {mean:.4f} +/- {1.96 * se:.4f}, n={len(rows)})")
+        # the interval's degrees of freedom are the number of independent histories, not of questions
+        half = t_quantile_975(max(1, len({h for h, _s in rows}) - 1)) * se
+        summary["scores"][cid] = {"score": report.score(cid), "item_mean": mean, "ci95_half_width": half, "n": len(rows)}
+        print(f"  {cid:32} {report.score(cid):.4f}  (item mean {mean:.4f} +/- {half:.4f}, n={len(rows)})")
     headline = HEADLINES[0]
     print(f"per type under {headline}:")
     for qtype, (score, n) in report.per_type(headline).items():

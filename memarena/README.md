@@ -17,6 +17,15 @@ Design: [docs/DESIGN.md](docs/DESIGN.md). Measured results: [docs/RESULTS.md](do
 
 ## Status
 
+**Under revision.** Independent reviews of the first version found that several of its claims did not hold:
+published exam results could be forged, an examiner could pick the paper, the rule-based judges paid for
+answers that committed to nothing, the contest verifier accepted doctored packages, and a rounding bug
+convicted honest units of cheating. This commit holds the rewritten exam protocol and the fixes that are
+finished. The judge and contest-verifier fixes, the designer run under the corrected code and
+`docs/RESULTS.md` are in progress, and `docs/DESIGN.md` still describes the first protocol in sections 4
+and 5. The run recorded earlier (commit `651f6c0`, `contest/`) was produced by the flawed code and has been
+withdrawn.
+
 Everything here runs offline with the standard library. **No language model has been called**: there was no
 API key in the build environment. The LLM-backed memory system, judge and brain are implemented and tested
 against a mock, and the Anthropic client is tested against the real SDK with a mock transport. The offline

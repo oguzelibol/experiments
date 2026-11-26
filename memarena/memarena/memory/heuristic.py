@@ -24,6 +24,7 @@ feature budget has to specialise:
 from __future__ import annotations
 
 import datetime as _dt
+import hashlib
 import math
 import re
 from collections import OrderedDict
@@ -312,12 +313,47 @@ class _Index:
 
 
 class _IndexCache:
+    """Indexes of recently seen histories, keyed by what the history says.
+
+    Ids are not a safe key: two benchmarks can carry different histories under
+    one id, and a stale index would silently answer one from the other.  The
+    key is a digest of the sessions' content.  The digest itself is remembered
+    per sessions tuple (the entry keeps the tuple alive, so its identity cannot
+    be reused while the entry exists), which makes repeat lookups free.
+    """
+
     def __init__(self, capacity: int = 256):
         self.capacity = capacity
         self._data: OrderedDict = OrderedDict()
+        self._digests: OrderedDict = OrderedDict()
+
+    def _digest(self, sessions: tuple) -> str:
+        hit = self._digests.get(id(sessions))
+        if hit is not None and hit[0] is sessions:
+            self._digests.move_to_end(id(sessions))
+            return hit[1]
+        h = hashlib.sha256()
+
+        def put(text: str) -> None:
+            raw = str(text).encode("utf-8", "surrogatepass")
+            h.update(len(raw).to_bytes(8, "big"))
+            h.update(raw)
+
+        h.update(len(sessions).to_bytes(8, "big"))
+        for session in sessions:
+            put(session.date)
+            h.update(len(session.turns).to_bytes(8, "big"))
+            for turn in session.turns:
+                put(turn.role)
+                put(turn.content)
+        digest = h.hexdigest()
+        self._digests[id(sessions)] = (sessions, digest)
+        if len(self._digests) > 4 * self.capacity:
+            self._digests.popitem(last=False)
+        return digest
 
     def get(self, probe: Probe, with_assistant: bool, with_exchange: bool) -> _Index:
-        key = (probe.haystack_id, len(probe.sessions), with_assistant, with_exchange)
+        key = (self._digest(probe.sessions), with_assistant, with_exchange)
         idx = self._data.get(key)
         if idx is None:
             idx = _Index(probe, with_assistant, with_exchange)

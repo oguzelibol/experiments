@@ -19,7 +19,7 @@ from typing import Mapping
 from ..actors.unit import UnitPolicy, UnitSpec, WorldRules
 from ..evalcore.criteria import CriteriaFamily
 from ..memory.heuristic import FEATURES, MemoryConfig
-from ..sim.engine import ExternalConfig, Scenario
+from ..sim.engine import ExternalConfig, Scenario, unit_secret
 from ..util import hash_obj, make_rng
 
 __all__ = ["Design", "sample_scenario", "mutate_design", "crossover", "SPECIALIST_TEMPLATES", "CRITERION_PLANS"]
@@ -100,7 +100,7 @@ class Design:
             specs.append(
                 UnitSpec(
                     unit_id=f"{prefix}{k:02d}", owner=owner, policy=self.policy, memory=memory,
-                    criterion_weights=weights, seed=f"{seed}:{k}",
+                    criterion_weights=weights, seed=unit_secret(seed, k),
                 )
             )
         return specs
@@ -148,6 +148,8 @@ _POLICY_MOVES: dict[str, tuple] = {
     "dev_streams": ("int", 3, 8, 1),
     "adopt_designs": ("bool",),
     "replicate": ("bool",),
+    "focused_dev": ("bool",),
+    "peer_scope": ("choice", ("criteria", "full", "none")),
 }
 
 
@@ -170,6 +172,8 @@ def mutate_design(design: Design, rng, n_moves: int = 2) -> Design:
             cur = getattr(d.policy, name)
             if spec[0] == "bool":
                 new = not cur
+            elif spec[0] == "choice":
+                new = rng.choice([v for v in spec[1] if v != cur])
             elif spec[0] == "int":
                 new = int(min(spec[2], max(spec[1], cur + rng.choice([-spec[3], spec[3]]))))
             else:

@@ -33,10 +33,16 @@ __all__ = ["BoardServer", "BoardClient"]
 
 
 class BoardServer:
-    def __init__(self, board: Board, tokens: Mapping[str, str] | None = None, host: str = "127.0.0.1", port: int = 0):
-        """``tokens`` maps bearer token -> author.  Without it any caller may post (tests only)."""
+    def __init__(self, board: Board, tokens: Mapping[str, str] | None = None, host: str = "127.0.0.1", port: int = 0,
+                 reserved: tuple[str, ...] = ()):
+        """``tokens`` maps bearer token -> author.  Without it any caller may post (tests only).
+
+        ``reserved`` author names can never be claimed without a token, even on
+        an open board; use it for the round clock.
+        """
         self.board = board
         self.tokens = dict(tokens or {})
+        self.reserved = tuple(reserved)
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -100,6 +106,8 @@ class BoardServer:
                         claimed = payload.get("author")
                         if author is None:
                             author = claimed
+                            if author in outer.reserved:
+                                return self._send(403, {"error": "that author name is reserved"})
                         elif claimed and claimed != author:
                             return self._send(403, {"error": "token does not belong to that author"})
                         post = outer.board.post(

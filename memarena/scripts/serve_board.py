@@ -3,7 +3,10 @@
 
     python scripts/serve_board.py --port 8765 --tokens tokens.json --store board.jsonl --round-seconds 20
 
-tokens.json maps bearer token -> author, e.g. {"secret-a": "unit-a", "secret-env": "env"}.
+tokens.json maps bearer token -> author, e.g. {"secret-a": "unit-a", "secret-b": "unit-b"}.
+Do not issue a token for the author "env": that name is reserved for the round clock,
+which this process posts itself.  Without --tokens the server refuses to start unless
+--insecure is given.
 """
 
 from __future__ import annotations
@@ -24,7 +27,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--tokens", help="JSON file mapping bearer token -> author")
+    ap.add_argument("--tokens", help="JSON file mapping bearer token -> author (include one for the clock author 'env')")
+    ap.add_argument("--insecure", action="store_true",
+                    help="run WITHOUT tokens: anyone who can reach the port can post as anyone. For local experiments only")
     ap.add_argument("--store", help="JSONL file to persist the board to")
     ap.add_argument("--round-seconds", type=float, default=0, help="post a clock tick this often (0: no clock)")
     ap.add_argument("--rounds", type=int, default=0, help="stop after this many rounds (0: run until interrupted)")
@@ -33,8 +38,17 @@ def main() -> int:
     if args.tokens:
         with open(args.tokens, "r", encoding="utf-8") as fh:
             tokens = json.load(fh)
+    elif not args.insecure:
+        print("refusing to start without --tokens: every writer must be authenticated "
+              "(pass --insecure to run an open board for a local experiment)", file=sys.stderr)
+        return 2
+    if tokens and "env" in set(tokens.values()) and args.round_seconds > 0:
+        pass  # the clock is posted in process below, under the reserved author name
     board = Board(args.store)
-    server = BoardServer(board, tokens=tokens, host=args.host, port=args.port).start()
+    clock_tokens = [t for t, a in tokens.items() if a == "env"]
+    if clock_tokens:
+        print("warning: a token for the reserved author 'env' lets its holder post the round clock", file=sys.stderr)
+    server = BoardServer(board, tokens=tokens, host=args.host, port=args.port, reserved=("env",)).start()
     print(f"board at {server.url}  ({len(board)} posts)", flush=True)
     try:
         r = max((p.round for p in board.read(0, kinds=["clock"])), default=0)

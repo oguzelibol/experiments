@@ -24,6 +24,7 @@ __all__ = [
     "noise_floor",
     "normal_cdf",
     "normal_quantile",
+    "t_quantile_975",
 ]
 
 
@@ -157,6 +158,25 @@ def noise_floor(n: int, p: float = 0.5, design_effect: float = 1.0) -> float:
     if n <= 0:
         return 1.0
     return 1.959964 * math.sqrt(design_effect * p * (1 - p) / n)
+
+
+_T975 = [12.706205, 4.302653, 3.182446, 2.776445, 2.570582, 2.446912, 2.364624, 2.306004, 2.262157, 2.228139,
+         2.200985, 2.178813, 2.160369, 2.144787, 2.131450, 2.119905, 2.109816, 2.100922, 2.093024, 2.085963,
+         2.079614, 2.073873, 2.068658, 2.063899, 2.059539, 2.055529, 2.051831, 2.048407, 2.045230, 2.042272]
+
+
+def t_quantile_975(df: int) -> float:
+    """97.5th percentile of Student's t with ``df`` degrees of freedom (for 95% intervals)."""
+    if df < 1:
+        return float("inf")
+    if df <= len(_T975):
+        return _T975[df - 1]
+    z = 1.959963985
+    # Cornish-Fisher expansion in 1/df; accurate to 1e-5 for df > 30
+    g1 = (z ** 3 + z) / 4
+    g2 = (5 * z ** 5 + 16 * z ** 3 + 3 * z) / 96
+    g3 = (3 * z ** 7 + 19 * z ** 5 + 17 * z ** 3 - 15 * z) / 384
+    return z + g1 / df + g2 / df ** 2 + g3 / df ** 3
 
 
 def normal_cdf(x: float) -> float:

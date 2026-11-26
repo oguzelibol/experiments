@@ -19,7 +19,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from ..actors.unit import UnitSpec, clamp_config, mutate_config
-from ..sim.collective import CLASS_CAPABILITIES, confirmed_cheats, gather_signals, reputation, select_champions
+from ..sim.collective import audit_board, reputation, select_champions
 from ..sim.engine import Simulation
 from ..util import make_rng
 from .design import Design
@@ -52,9 +52,7 @@ def operate(
         if epoch == epochs - 1:
             break
         members = sorted(uid for uid, u in sim.units.items() if u.spec.owner == owner)
-        signals = gather_signals(sim.board)
-        cheats, bad = confirmed_cheats(sim.board, sim.family)
-        signals = [s for s in signals if s.seq not in bad]
+        signals, cheats, _bad = audit_board(sim.board, sim.family, sim._verified)
         rep = reputation(signals, sorted(sim.units), banned=cheats, seeds=members)
         since = {uid: u.version_round for uid, u in sim.units.items()}
         champions = select_champions(signals, rep, members, since)
@@ -83,7 +81,7 @@ def operate(
                 uid = f"{owner[:1]}n{released:02d}"
                 memory = mutate_config(base, rng, sim.scenario.rules.feature_budget)
                 template = design.build(seed=f"{seed}:release:{released}", rules=sim.scenario.rules, owner=owner)[0]
-                spec = replace(template, unit_id=uid, memory=memory, seed=f"{seed}:release:{released}")
+                spec = replace(template, unit_id=uid, memory=memory)
                 sim.add_unit(spec)
                 born[uid] = sim.round
                 log.append({"round": sim.round, "action": "release", "unit": uid, "aimed_at": weakest,

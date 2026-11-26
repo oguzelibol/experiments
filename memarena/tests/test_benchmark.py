@@ -83,14 +83,51 @@ def test_longmemeval_adapter_strips_leaks(tmp_path):
     ]
     path = tmp_path / "lme.json"
     path.write_text(json.dumps(rows))
-    bench = load_longmemeval(str(path))
-    first = bench.instances[0]
+    bench = load_longmemeval(str(path), salt="fixed-for-the-test")
+    first = next(i for i in bench.instances if i.source_id == "abc123_abs")
     blob = json.dumps(first.probe.to_dict())
     assert "_abs" not in blob and "has_answer" not in blob and "answer_1" not in blob
     assert first.key.is_abstention and first.key.question_type == "temporal-reasoning"
-    assert [s.date for s in first.probe.sessions] == ["2023-05-01", "2023-05-20"]  # chronological
+    assert [s.date for s in first.probe.sessions] == ["2023-05-01 09:00", "2023-05-20 10:00"]  # chronological
+    assert first.probe.question_date == "2023-05-30 23:40"
     assert len(first.key.evidence_session_ids) == 1
-    assert bench.instances[1].key.meta["rubric"].startswith("The user would prefer")
+    second = next(i for i in bench.instances if i.source_id == "q2")
+    assert second.key.meta["rubric"].startswith("The user would prefer")
+
+
+def _lme_rows(n_per_type=12):
+    rows = []
+    types = ["temporal-reasoning", "multi-session", "single-session-user"]
+    for t in types:  # grouped by type, like the public file
+        for k in range(n_per_type):
+            rows.append({
+                "question_id": f"{t}-{k}" + ("_abs" if k % 4 == 0 else ""), "question_type": t, "question": f"q {t} {k}?",
+                "answer": "a", "question_date": "2023/06/01 (Thu) 08:00", "haystack_session_ids": ["s1"],
+                "haystack_dates": ["2023/05/02 (Tue) 09:00"], "haystack_sessions": [[{"role": "user", "content": "x"}]],
+                "answer_session_ids": ["s1"],
+            })
+    return rows
+
+
+def test_public_ids_and_order_do_not_leak_labels(tmp_path):
+    from memarena.benchmark.schema import opaque_id
+
+    rows = _lme_rows()
+    path = tmp_path / "lme.json"
+    path.write_text(json.dumps(rows))
+    a, b = load_longmemeval(str(path)), load_longmemeval(str(path))
+    # ids depend on a secret salt: two loads disagree, and neither matches a guessable salt
+    assert {i.probe_id for i in a} != {i.probe_id for i in b}
+    guessable = {opaque_id(s, r["question_id"]) for r in rows for s in ("longmemeval", "", "salt")}
+    assert not ({i.probe_id for i in a} & guessable)
+    # position no longer encodes the type: the first third is not all one type
+    first_third = [i.key.question_type for i in a.instances[:12]]
+    assert len(set(first_third)) > 1
+    # a limited load is a stratified sample, not the first rows
+    small = load_longmemeval(str(path), limit=9)
+    assert len(small) == 9 and set(small.type_counts().values()) == {3}
+    # the same salt reproduces the same benchmark
+    assert [i.probe_id for i in load_longmemeval(str(path), salt="s")] == [i.probe_id for i in load_longmemeval(str(path), salt="s")]
 
 
 def test_locomo_adapter(tmp_path):
@@ -107,7 +144,48 @@ def test_locomo_adapter(tmp_path):
     }]
     path = tmp_path / "locomo.json"
     path.write_text(json.dumps(sample))
-    bench = load_locomo(str(path))
-    assert len(bench) == 2 and bench.instances[1].key.is_abstention
-    assert bench.instances[0].probe.sessions[0].date == "2023-05-08"
+    bench = load_locomo(str(path), salt="t")
+    assert len(bench) == 2 and sum(i.key.is_abstention for i in bench) == 1
+    assert bench.instances[0].probe.sessions[0].date == "2023-05-08 13:56"
+    assert parse_date(bench.instances[0].probe.sessions[0].date).isoformat() == "2023-05-08"
     assert len(load_locomo(str(path), include_adversarial=False)) == 1
+
+
+def _row(qid, sessions, qtype="temporal-reasoning", qdate="2023/06/01 (Thu) 08:00"):
+    return {
+        "question_id": qid, "question_type": qtype, "question": f"q {qid}?", "answer": "a", "question_date": qdate,
+        "haystack_session_ids": [f"s{k}" for k in range(len(sessions))], "haystack_dates": [d for d, _ in sessions],
+        "haystack_sessions": [[{"role": "user", "content": text}] for _, text in sessions], "answer_session_ids": ["s0"],
+    }
+
+
+def test_longmemeval_same_day_sessions_are_ordered_by_time(tmp_path):
+    rows = [_row("q1", [("2023/05/28 (Sun) 21:04", "the evening webinar"), ("2023/05/28 (Sun) 07:17", "the morning workshop")])]
+    path = tmp_path / "lme.json"
+    path.write_text(json.dumps(rows))
+    probe = load_longmemeval(str(path), salt="t").instances[0].probe
+    assert [s.date for s in probe.sessions] == ["2023-05-28 07:17", "2023-05-28 21:04"]
+    assert [s.turns[0].content for s in probe.sessions] == ["the morning workshop", "the evening webinar"]
+
+
+def test_longmemeval_histories_are_identified_by_content_and_overlaps_are_clustered(tmp_path):
+    shared = ("2023/05/02 (Tue) 09:00", "I adopted a dog named Biscuit")
+    rows = [
+        _row("a1", [shared]), _row("a1_abs", [shared]),  # twins: the same history
+        _row("b1", [shared, ("2023/05/03 (Wed) 09:00", "something only b1 has")]),  # overlaps the twins
+        _row("c1", [("2023/05/09 (Tue) 09:00", "I adopted a dog named Biscuit")]),  # same text, another date
+    ] + [_row(f"z{k}", [("2023/05/04 (Thu) 09:00", f"unrelated {k}")]) for k in range(8)]
+    path = tmp_path / "lme.json"
+    path.write_text(json.dumps(rows))
+    bench = load_longmemeval(str(path), salt="t")
+    by = {i.source_id: i for i in bench}
+    assert by["a1"].probe.haystack_id == by["a1_abs"].probe.haystack_id
+    assert by["a1"].probe.sessions is by["a1_abs"].probe.sessions
+    assert by["a1"].probe.haystack_id != by["b1"].probe.haystack_id != by["c1"].probe.haystack_id
+    assert by["a1"].probe.haystack_id != by["c1"].probe.haystack_id  # the date is part of the history
+    assert by["a1"].cluster_id == by["a1_abs"].cluster_id == by["b1"].cluster_id == by["c1"].cluster_id
+    assert len(set(bench.clusters().values())) == 9 and bench.info["clusters_in_source"] == 9
+    for seed in range(5):
+        parts = bench.split({"dev": 0.5, "test": 0.5}, seed=seed)
+        text = {n: {t.content for i in part for s_ in i.probe.sessions for t in s_.turns} for n, part in parts.items()}
+        assert not (text["dev"] & text["test"])

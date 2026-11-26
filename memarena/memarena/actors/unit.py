@@ -39,7 +39,9 @@ from ..evalcore.standard import CAPABILITIES, Standard, normalise
 from ..memory.base import MemorySystem, run_system
 from ..memory.heuristic import FEATURES, STYLES, HeuristicMemory, MemoryConfig
 from ..util import commit, make_rng, sha256_hex, verify_commit
-from .protocol import derive_exam_seed, instances_from, pack_probes, unpack_probes, verify_result
+from .protocol import (
+    check_result, derive_exam_share, joint_exam_seed, pack_probes, share_commitment, unpack_probes,
+)
 
 __all__ = ["WorldRules", "UnitPolicy", "UnitSpec", "Unit", "PeerView", "pack_probes", "unpack_probes", "mutate_config"]
 
@@ -78,7 +80,12 @@ class UnitPolicy:
     min_gain: float = 0.015  # improvement on dev needed to adopt a change
     replicate: bool = True  # a change must also win on a second, fresh dev set
     specialty_count: int = 3  # abilities its exams focus on
-    specialty_focus: float = 0.5  # weight of own specialties vs esteemed peers' standards when striving
+    specialty_focus: float = 0.5  # weight of own standard vs esteemed peers' standards when striving
+    # What esteemed peers contribute to "better": "criteria" = how they score, applied to MY specialties;
+    # "full" = how they score and what they examine (pulls a unit towards its peers' specialties);
+    # "none" = nothing.
+    peer_scope: str = "criteria"
+    focused_dev: bool = True  # compare designs on data drawn from my own specialties, not on a balanced set
     niche: float = 0.5  # 0: specialise where I score highest; 1: where I beat the peers I know
     crowd_aversion: float = 0.2  # avoid abilities many known peers already examine
     scan: int = 2  # other units whose latest profile I glance at each round
@@ -92,6 +99,10 @@ class UnitPolicy:
     conformity: float = 0.0  # per-round drift of own scoring belief towards esteemed peers'
     audit_rate: float = 0.25  # chance of re-computing a result read on an attended feed
     guess_shade: float = 1.0  # 0: state the mean; 1: state the loss-optimal self-estimate
+
+    def __post_init__(self):
+        if self.peer_scope not in ("criteria", "full", "none"):
+            raise ValueError(f"unknown peer_scope {self.peer_scope!r}")
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -328,11 +339,15 @@ class Unit:
                     examinee = post.body.get("examinee")
                     if not examinee or examinee == self.id:
                         continue
-                    if rng.random() < self.policy.audit_rate and not self._audit_result(post):
+                    if self.policy.second_hand <= 0 and rng.random() >= self.policy.audit_rate:
+                        continue  # not relying on relayed signals, and not auditing this one
+                    self.stats["audits"] += 1
+                    verdict = self._check(post)
+                    if not verdict.ok:
+                        self._flag(post.author, post.seq, verdict.reason)
                         continue
-                    self.view(examinee).relayed[post.body["xid"]] = (
-                        peer, float(post.body["score"]), int(post.body["receipt"]["n_items"]), post.round,
-                    )
+                    # a relayed signal is only ever used after I have recomputed it myself
+                    self.view(examinee).relayed[verdict.xid] = (peer, verdict.score, verdict.n_items, post.round)
                 elif post.kind == "audit.fail":
                     self._check_accusation(post)
         # A glance at a few other units' latest profile: cheap discovery, not attention.
@@ -357,9 +372,13 @@ class Unit:
         v.design = body.get("design")
 
     # --------------------------------------------------------------- audits
+    def _check(self, post):
+        """Verify a published exam result from public evidence (see ``protocol.check_result``)."""
+        return check_result(self.board, post, self.eval.family)
+
     def _verify_result(self, post) -> tuple[bool, str]:
-        """Recompute a published exam result from its public evidence (see ``protocol.verify_result``)."""
-        return verify_result(self.board, post.body, self.eval.family, examiner=post.author, result_seq=post.seq)
+        verdict = self._check(post)
+        return verdict.ok, verdict.reason
 
     def _audit_result(self, post) -> bool:
         """Verify a result seen on a feed; publish an audit failure if it does not hold."""
@@ -376,11 +395,11 @@ class Unit:
         self._post("audit.fail", {"examiner": examiner, "result_seq": result_seq, "reason": why})
 
     def _check_accusation(self, post) -> None:
-        """Never take an accusation on trust: recompute it."""
+        """Never take an accusation on trust: recompute it, transcript and all."""
         try:
             seq = int(post.body["result_seq"])
             target = self.board.read(since_seq=seq - 1, limit=1)[0]
-        except (KeyError, ValueError, IndexError):
+        except (KeyError, ValueError, TypeError, IndexError):
             return
         if target.kind != "exam.result" or target.author != post.body.get("examiner"):
             self.view(post.author).integrity = 0.0  # points at something that is not a result
@@ -415,9 +434,9 @@ class Unit:
             "receipt": dict(evaluation.receipt),
         }
 
-    def _draw_exam(self, examinee: str, exam_seed: str):
+    def _draw_exam(self, examinee: str, exam_seed: str, module: EvaluationModule):
         """The exam for one examinee: drawn from my published standard, whoever is asking."""
-        return generate(exam_seed, self.eval.standard.gen_config(self.rules.exam_streams, self.rules.exam_questions))
+        return generate(exam_seed, module.standard.gen_config(self.rules.exam_streams, self.rules.exam_questions))
 
     def _answer_exam(self, probes: Sequence[Probe], examiner: str, xid: str) -> dict[str, Answer]:
         return run_system(self.memory, probes)
@@ -426,85 +445,81 @@ class Unit:
         return self.rules.peer_loss.best_report(mean, sd, self.policy.guess_shade)
 
     def on_message(self, post) -> None:
-        """Handle one post addressed to me."""
+        """Handle one post addressed to me.  A malformed post is ignored, never fatal."""
         handler = {
-            "exam.request": self._on_request, "exam.offer": self._on_offer, "exam.answers": self._on_answers,
-            "exam.graded": self._on_graded, "exam.guess": self._on_guess, "exam.result": self._on_result,
+            "exam.request": self._on_request, "exam.ready": self._on_ready, "exam.nonce": self._on_nonce,
+            "exam.offer": self._on_offer, "exam.answers": self._on_answers, "exam.graded": self._on_graded,
+            "exam.guess": self._on_guess, "exam.result": self._on_result,
         }.get(post.kind)
-        if handler is not None:
+        if handler is None or not isinstance(post.body, Mapping):
+            return
+        try:
             handler(post)
+        except Exception as exc:  # noqa: BLE001 - whatever a peer sends, it must not be able to stop me
+            self.log.append({"round": self.round, "event": "bad_message", "kind": post.kind,
+                             "from": post.author, "why": f"{type(exc).__name__}: {str(exc)[:200]}"})
 
+    # -- as examiner
     def _on_request(self, post) -> None:
         xid = post.body.get("xid")
-        if not xid or xid in self._set or post.author == self.id:
+        if not isinstance(xid, str) or not xid or xid in self._set or post.author == self.id:
             return
         if self._served >= self.policy.serve_capacity or self.table is None:
             self._post("exam.decline", {"xid": xid}, to=post.author)
             return
         self._served += 1
         self._exam_counter += 1
-        std = self.eval.standard
-        exam_seed = derive_exam_seed(self.spec.seed, self.id, self._exam_counter)
-        exam = self._draw_exam(post.author, exam_seed)
+        share = derive_exam_share(self.spec.seed, self.id, self._exam_counter)
+        # The standard in force now is frozen for this exam, even if I change my mind before grading.
+        self._set[xid] = {
+            "examinee": post.author, "share": share, "module": self.eval, "request_seq": post.seq,
+            "round": self.round,
+        }
+        ready = self._post("exam.ready", {"xid": xid, "share_commit": share_commitment(share)}, to=post.author)
+        self._set[xid]["ready_seq"] = ready.seq
+
+    def _on_nonce(self, post) -> None:
+        xid = post.body.get("xid")
+        st = self._set.get(xid)
+        nonce = post.body.get("nonce")
+        if st is None or st["examinee"] != post.author or "exam" in st or not isinstance(nonce, str) or not nonce:
+            return
+        module: EvaluationModule = st["module"]
+        exam = self._draw_exam(post.author, joint_exam_seed(st["share"], nonce, xid), module)
         salt = sha256_hex(f"{self.spec.seed}:{self.id}:salt:{xid}")[:20]
         probes_blob = self.board.put_blob(pack_probes(exam.probes()))
-        self._set[xid] = {"examinee": post.author, "exam": exam, "salt": salt, "probes": probes_blob, "seed": exam_seed}
         from ..evalcore.module import keys_commitment
 
+        st.update(exam=exam, salt=salt, probes=probes_blob, nonce_seq=post.seq)
         offer = self._post(
             "exam.offer",
             {
                 "xid": xid, "probes": probes_blob, "n": len(exam),
                 "keys_commit": keys_commitment(exam.instances, salt),
-                "standard": std.to_dict(), "evaluator": self.eval.fingerprint(),
+                "standard": module.standard.to_dict(), "evaluator": module.fingerprint(),
                 "loss": self.rules.peer_loss.to_dict(),
+                "exam_size": [self.rules.exam_streams, self.rules.exam_questions],
             },
             to=post.author,
         )
-        self._set[xid]["offer_seq"] = offer.seq
-
-    def _on_offer(self, post) -> None:
-        xid = post.body.get("xid")
-        st = self._sat.get(xid)
-        if st is None or st.get("examiner") != post.author or "answers" in st:
-            return
-        try:
-            probes = unpack_probes(self.board.get_blob(post.body["probes"]))
-            standard = Standard.from_dict(post.body["standard"])
-        except (KeyError, ValueError, TypeError):
-            return
-        self.view(post.author).standard = standard
-        answers = self._answer_exam(probes, post.author, xid)
-        mean, sd = self._predict(standard, len(probes), post.author)
-        guess = self._make_guess(mean, sd)
-        nonce = sha256_hex(f"{self.spec.seed}:{self.id}:nonce:{xid}")[:20]
-        answers_blob = self.board.put_blob({pid: a.to_dict() for pid, a in sorted(answers.items())})
-        st.update(answers=answers, probes=probes, guess=guess, nonce=nonce, predicted=mean, offer=dict(post.body))
-        self._post("exam.answers", {"xid": xid, "answers": answers_blob, "guess_commit": commit(guess, nonce)}, to=post.author)
+        st["offer_seq"] = offer.seq
 
     def _on_answers(self, post) -> None:
         xid = post.body.get("xid")
         st = self._set.get(xid)
-        if st is None or st["examinee"] != post.author or "evaluation" in st:
+        if st is None or st["examinee"] != post.author or "exam" not in st or "evaluation" in st:
             return
-        try:
-            answers = {pid: Answer.from_dict(a) for pid, a in self.board.get_blob(post.body["answers"]).items()}
-        except (KeyError, ValueError, TypeError):
-            return
-        evaluation = self.eval.evaluate(answers, st["exam"].instances, st["salt"])
+        if post.body.get("offer_seq") != st["offer_seq"]:
+            return  # not an answer to the paper I set
+        answers = {str(pid): Answer.from_dict(a) for pid, a in self.board.get_blob(post.body["answers"]).items()}
+        evaluation = st["module"].evaluate(answers, st["exam"].instances, st["salt"])
         payload = self._result_payload(post.author, evaluation)
         nonce = sha256_hex(f"{self.spec.seed}:{self.id}:rnonce:{xid}")[:20]
-        st.update(evaluation=evaluation, payload=payload, nonce=nonce,
-                  answers_blob=post.body["answers"], guess_commit=post.body.get("guess_commit", ""))
-        self._post("exam.graded", {"xid": xid, "result_commit": commit(payload["score"], nonce)}, to=post.author)
-
-    def _on_graded(self, post) -> None:
-        xid = post.body.get("xid")
-        st = self._sat.get(xid)
-        if st is None or st.get("examiner") != post.author or "guess" not in st or "result_commit" in st:
-            return
-        st["result_commit"] = post.body.get("result_commit", "")
-        self._post("exam.guess", {"xid": xid, "guess": st["guess"], "nonce": st["nonce"]}, to=post.author)
+        st.update(evaluation=evaluation, payload=payload, nonce=nonce, answers_seq=post.seq,
+                  answers_blob=post.body["answers"], guess_commit=str(post.body.get("guess_commit", "")))
+        graded = self._post("exam.graded", {"xid": xid, "result_commit": commit(payload["score"], nonce)}, to=post.author)
+        st["graded_seq"] = graded.seq
+        st["graded_round"] = self.round
 
     def _on_guess(self, post) -> None:
         xid = post.body.get("xid")
@@ -512,52 +527,107 @@ class Unit:
         if st is None or st["examinee"] != post.author or "payload" not in st or st.get("done"):
             return
         guess = post.body.get("guess")
-        valid = isinstance(guess, (int, float)) and verify_commit(st["guess_commit"], guess, str(post.body.get("nonce", "")))
-        if not valid:
-            guess = 1.0  # a self-estimate that does not open is treated as the maximal claim
-        guess = min(1.0, max(0.0, float(guess)))
+        valid = (
+            isinstance(guess, (int, float)) and not isinstance(guess, bool) and math.isfinite(float(guess))
+            and verify_commit(st["guess_commit"], guess, str(post.body.get("nonce", "")))
+        )
+        self._publish_result(xid, st, min(1.0, max(0.0, float(guess))) if valid else 1.0, bool(valid), post.seq)
+
+    def _publish_result(self, xid: str, st: dict, guess: float, valid: bool, guess_seq: int | None) -> None:
+        """Publish the outcome of an exam: the public signal about the examinee."""
         payload = st["payload"]
         loss = self.rules.peer_loss(guess, payload["score"])
-        keys_blob = self.board.put_blob([i.key.to_dict() for i in st["exam"].instances])
         st["done"] = True
         self.stats["exams_set"] += 1
         self._post(
             "exam.result",
             {
-                "xid": xid, "examinee": post.author, **payload,
-                "guess": guess, "guess_valid": bool(valid), "loss": loss,
-                "loss_spec": self.rules.peer_loss.to_dict(),
-                "probes": st["probes"], "answers": st["answers_blob"], "keys": keys_blob,
-                "salt": st["salt"], "nonce": st["nonce"],
-                "exam_seed": st["seed"], "exam_size": [self.rules.exam_streams, self.rules.exam_questions],
-                "offer_seq": st["offer_seq"],
+                "xid": xid, "examinee": st["examinee"], **payload,
+                "guess": guess, "guess_valid": valid, "loss": loss,
+                "probes": st["probes"], "answers": st["answers_blob"],
+                "salt": st["salt"], "nonce": st["nonce"], "share": st["share"],
+                "request_seq": st["request_seq"], "ready_seq": st["ready_seq"], "nonce_seq": st["nonce_seq"],
+                "offer_seq": st["offer_seq"], "answers_seq": st["answers_seq"], "graded_seq": st["graded_seq"],
+                "guess_seq": guess_seq,
             },
-            to=post.author,
+            to=st["examinee"],
         )
         n = int(payload["receipt"]["n_items"])
-        self.view(post.author).first_hand.append((float(payload["score"]), n, float(loss), self.round))
-        st.pop("exam", None)  # keys are public now; the set is spent
+        self.view(st["examinee"]).first_hand.append((float(payload["score"]), n, float(loss), self.round))
+        st.pop("exam", None)  # the seed share is public now; the paper is spent
+
+    def _close_unopened(self) -> None:
+        """Exams whose examinee never opened its self-estimate are published once the round is over.
+
+        Otherwise an examinee could make a bad grade disappear by going silent.
+        The unopened estimate counts as the maximal claim.
+        """
+        for xid, st in list(self._set.items()):
+            if "payload" in st and not st.get("done") and st.get("graded_round", self.round) < self.round:
+                self._publish_result(xid, st, 1.0, False, None)
+
+    # -- as examinee
+    def _on_ready(self, post) -> None:
+        xid = post.body.get("xid")
+        st = self._sat.get(xid)
+        if st is None or st.get("examiner") != post.author or "nonce" in st:
+            return
+        st["nonce"] = sha256_hex(f"{self.spec.seed}:{self.id}:exam-nonce:{xid}")[:32]
+        self._post("exam.nonce", {"xid": xid, "nonce": st["nonce"]}, to=post.author)
+
+    def _on_offer(self, post) -> None:
+        xid = post.body.get("xid")
+        st = self._sat.get(xid)
+        if st is None or st.get("examiner") != post.author or "nonce" not in st or "answers" in st:
+            return
+        # I only sit exams on the terms this world runs on.
+        if post.body.get("loss") != self.rules.peer_loss.to_dict():
+            return
+        if list(post.body.get("exam_size", ())) != [self.rules.exam_streams, self.rules.exam_questions]:
+            return
+        probes = unpack_probes(self.board.get_blob(post.body["probes"]))
+        if len(probes) != self.rules.exam_streams * self.rules.exam_questions:
+            return  # not the size of exam this world sits
+        standard = Standard.from_dict(post.body["standard"])
+        self.view(post.author).standard = standard
+        answers = self._answer_exam(probes, post.author, xid)
+        mean, sd = self._predict(standard, len(probes), post.author)
+        guess = self._make_guess(mean, sd)
+        guess_nonce = sha256_hex(f"{self.spec.seed}:{self.id}:nonce:{xid}")[:20]
+        answers_blob = self.board.put_blob({pid: a.to_dict() for pid, a in sorted(answers.items())})
+        st.update(answers=answers, guess=guess, guess_nonce=guess_nonce, predicted=mean, offer_seq=post.seq)
+        self._post(
+            "exam.answers",
+            {"xid": xid, "answers": answers_blob, "guess_commit": commit(guess, guess_nonce), "offer_seq": post.seq},
+            to=post.author,
+        )
+
+    def _on_graded(self, post) -> None:
+        xid = post.body.get("xid")
+        st = self._sat.get(xid)
+        if st is None or st.get("examiner") != post.author or "guess" not in st or "result_commit" in st:
+            return
+        st["result_commit"] = str(post.body.get("result_commit", ""))
+        self._post("exam.guess", {"xid": xid, "guess": st["guess"], "nonce": st["guess_nonce"]}, to=post.author)
 
     def _on_result(self, post) -> None:
         xid = post.body.get("xid")
+        if post.body.get("examinee") != self.id:
+            return
         st = self._sat.get(xid)
+        self.stats["audits"] += 1
+        verdict = self._check(post)
+        if not verdict.ok:
+            # including a result about an exam I never sat: it has no transcript of mine to point at
+            self._flag(post.author, post.seq, verdict.reason)
+            return
         if st is None or st.get("examiner") != post.author or st.get("done"):
             return
         st["done"] = True
         self.stats["exams_sat"] += 1
-        committed = verify_commit(st.get("result_commit", ""), post.body.get("score"), str(post.body.get("nonce", "")))
-        ok, why = self._verify_result(post) if committed else (False, "result differs from its commitment")
-        if ok and post.body.get("guess_valid") and abs(float(post.body.get("guess", -1)) - st["guess"]) > 1e-6:
-            ok, why = False, "the result quotes a self-estimate I did not give"
-        if ok and post.body.get("examinee") != self.id:
-            ok, why = False, "the result names a different examinee"
-        self.stats["audits"] += 1
-        if not ok:
-            self._flag(post.author, post.seq, why)
-            return
-        caps = {c: (float(s), int(n)) for c, (s, n) in post.body["capability"].items()}
+        # record what I recomputed, not what the post says
         self.view(post.author).signals.append(
-            (caps, float(post.body["score"]), int(post.body["receipt"]["n_items"]), self.round, st.get("predicted"))
+            (dict(verdict.capability), verdict.score, verdict.n_items, self.round, st.get("predicted"))
         )
 
     # ---------------------------------------------------------------- esteem
@@ -612,21 +682,27 @@ class Unit:
 
     # --------------------------------------------------------------- striving
     def _objective(self, table: CapabilityTable) -> float:
-        """What "better" means to me: my specialties, and my esteemed peers' standards."""
+        """What "better" means to me.
+
+        Being the best in what I do: my own specialties, scored the way I score
+        and the way the peers I esteem score.  With ``peer_scope="full"`` their
+        choice of abilities counts too, which rewards becoming more like them.
+        """
         own = self.eval.standard
+        pol = self.policy
         mine = expected_score(table, own.criterion_weights, own.capability_weights)
+        if pol.peer_scope == "none":
+            return mine
         theirs = wsum = 0.0
         for peer, w in self.attention:
             std = self.view(peer).standard
             if std is not None:
-                theirs += w * expected_score(table, std.criterion_weights, std.capability_weights)
+                abilities = std.capability_weights if pol.peer_scope == "full" else own.capability_weights
+                theirs += w * expected_score(table, std.criterion_weights, abilities)
                 wsum += w
         if wsum <= 0:
-            balanced = {c: 1.0 for c in CAPABILITIES}
-            return self.policy.specialty_focus * mine + (1 - self.policy.specialty_focus) * expected_score(
-                table, own.criterion_weights, balanced
-            )
-        return self.policy.specialty_focus * mine + (1 - self.policy.specialty_focus) * theirs / wsum
+            return mine
+        return pol.specialty_focus * mine + (1 - pol.specialty_focus) * theirs / wsum
 
     def _candidates(self, rng) -> list[MemoryConfig]:
         budget = self.rules.feature_budget
@@ -652,9 +728,12 @@ class Unit:
         if self.policy.trials_per_round <= 0:
             return
         rng = self._rng("strive", self.round)
+        # Under "full" scope every ability matters, so the comparison needs a balanced set;
+        # otherwise the set is drawn from my own specialties, where the comparison is decided.
+        balanced = self.policy.peer_scope == "full" or not self.policy.focused_dev
         dev = generate(
             f"{self.spec.seed}:{self.id}:dev:{self.round}",
-            self.eval.standard.gen_config(self.policy.dev_streams, 12, balanced=True),
+            self.eval.standard.gen_config(self.policy.dev_streams, 12, balanced=balanced),
         )
 
         def measure(memory: MemorySystem, bench) -> float:
@@ -680,7 +759,7 @@ class Unit:
                 if confirm is None:
                     confirm = generate(
                         f"{self.spec.seed}:{self.id}:confirm:{self.round}",
-                        self.eval.standard.gen_config(self.policy.dev_streams, 12, balanced=True),
+                        self.eval.standard.gen_config(self.policy.dev_streams, 12, balanced=balanced),
                     )
                     base_confirm = measure(self.memory, confirm)
                 if measure(candidate, confirm) <= base_confirm + self.policy.min_gain / 2:
@@ -726,6 +805,7 @@ class Unit:
     def begin_round(self, round_: int) -> None:
         self.round = round_
         self._served = 0
+        self._close_unopened()
         self._refresh_profile()
         self._update_specialties()
         self._read_feeds()

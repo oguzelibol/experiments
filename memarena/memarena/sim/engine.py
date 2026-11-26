@@ -28,18 +28,18 @@ from ..evalcore.criteria import JUDGE_SCORERS, CriteriaFamily, Criterion, aggreg
 from ..evalcore.grader import GradeReport, Grader
 from ..evalcore.module import CapabilityTable, expected_score
 from ..evalcore.standard import CAPABILITIES
-from ..feeds.board import Board
+from ..feeds.board import AuthorBoard, Board
 from ..memory.base import run_system
 from ..memory.heuristic import FEATURES, MemoryConfig, observable_class
 from ..util import make_rng, sha256_hex
 from .adversaries import UNIT_KINDS, Colluder
 from .collective import (
-    CLASS_CAPABILITIES, collective_estimate, confirmed_cheats, gather_signals, reputation, select_champions,
+    CLASS_CAPABILITIES, audit_board, collective_estimate, gather_signals, reputation, select_champions,
 )
 
 __all__ = [
     "ExternalConfig", "ExternalEvaluator", "Scenario", "Simulation", "SimResult",
-    "spearman", "random_population",
+    "spearman", "random_population", "unit_secret",
 ]
 
 
@@ -154,6 +154,12 @@ def spearman(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     return sum((a - mx) * (b - my) for a, b in zip(rx, ry)) / (vx * vy) ** 0.5
 
 
+def unit_secret(world_seed: int | str, index: int | str) -> str:
+    """A unit's private seed.  One-way in the world seed: a unit that knows its own secret
+    learns nothing about other units' secrets, the world, or the outside benchmark."""
+    return sha256_hex(f"unit-secret|{world_seed}|{index}")[:40]
+
+
 def random_population(
     n: int, seed: int | str, rules: WorldRules | None = None, policy: UnitPolicy | None = None,
     owner: str = "designer", prefix: str = "u",
@@ -173,7 +179,7 @@ def random_population(
         specs.append(
             UnitSpec(
                 unit_id=f"{prefix}{k:02d}", owner=owner, policy=policy, memory=cfg,
-                criterion_weights={criterion: 1.0}, seed=f"{seed}:{k}",
+                criterion_weights={criterion: 1.0}, seed=unit_secret(seed, k),
             )
         )
     return specs
@@ -205,6 +211,7 @@ class Simulation:
         for spec in specs:
             self.add_unit(spec)
         self._cursor = 0
+        self._verified: dict[int, bool] = {}
         self._truth: dict[str, dict] = {}
         self.trace: list[dict] = []
         self.round = 0
@@ -222,7 +229,13 @@ class Simulation:
         kwargs: dict = {"rules": self.scenario.rules, "brain": brain, "family": self.family}
         if cls is Colluder:
             kwargs["shared"] = self._ring
-        unit = cls(spec, self._board_for(spec.unit_id) if self._board_for else self.board, **kwargs)
+        if self._board_for:
+            unit_board = self._board_for(spec.unit_id)
+        elif isinstance(self.board, Board):
+            unit_board = AuthorBoard(self.board, spec.unit_id)  # a unit can post only under its own name
+        else:
+            unit_board = self.board
+        unit = cls(spec, unit_board, **kwargs)
         self.units[spec.unit_id] = unit
         return unit
 
@@ -288,9 +301,8 @@ class Simulation:
     def collective(self, members: Sequence[str] | None = None, shade: float = 1.0) -> dict:
         """Champions, composite answers, the society's estimate and the outside outcome."""
         members = sorted(members if members is not None else self.units)
-        signals = gather_signals(self.board)
-        cheats, bad = confirmed_cheats(self.board, self.family)
-        signals = [s for s in signals if s.seq not in bad]
+        # Every result is re-verified here; nothing unverified reaches the society's accounts.
+        signals, cheats, _bad = audit_board(self.board, self.family, self._verified)
         rep = reputation(signals, sorted(self.units), banned=cheats, seeds=members)
         champions = select_champions(signals, rep, members, self._current_since())
         probes = self.external.probes()
@@ -325,6 +337,8 @@ class Simulation:
             "value": outside - self.scenario.external.penalty_weight * loss,
             "champion_regret": sum(regret) / len(regret) if regret else None,
             "reputation": rep, "cheats": sorted(cheats), "n_signals": len(signals),
+            "mean_peer_loss": sum(s.loss for s in signals) / len(signals) if signals else None,
+            "results_posted": len(gather_signals(self.board)),
         }
 
     def result(self) -> SimResult:
@@ -355,7 +369,6 @@ class Simulation:
         ids = sorted(units)
         rep_validity = spearman([rep.get(u, 0.0) for u in ids], [true_scores[u] for u in ids])
 
-        signals = gather_signals(self.board)
         attention_to_bad = []
         bad_kinds = {uid for uid, u in units.items() if u.spec.kind != "honest"}
         for uid in honest:
@@ -374,8 +387,9 @@ class Simulation:
             "best_single_true": max(true_scores.values()) if true_scores else None,
             "esteem_validity": sum(validities) / len(validities) if validities else None,
             "reputation_validity": rep_validity,
-            "exchanges": len(signals),
-            "mean_peer_loss": sum(s.loss for s in signals) / len(signals) if signals else None,
+            "exchanges": coll["n_signals"],  # exams whose published result verifies
+            "results_posted": coll["results_posted"],
+            "mean_peer_loss": coll["mean_peer_loss"],
             "cheats_confirmed": coll["cheats"],
             "attention_to_dishonest": sum(attention_to_bad) / len(attention_to_bad) if attention_to_bad and bad_kinds else None,
             **totals,

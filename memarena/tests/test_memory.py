@@ -4,7 +4,7 @@ from memarena.benchmark.schema import Answer, Probe
 from memarena.benchmark.synthetic import GenConfig, generate
 from memarena.evalcore.criteria import CriteriaFamily
 from memarena.evalcore.grader import Grader
-from memarena.memory.base import ABSTAIN_TEXT, run_system
+from memarena.memory.base import ABSTAIN_TEXT, run_isolated, run_system
 from memarena.memory.heuristic import FEATURES, HeuristicMemory, MemoryConfig, classify_question, observable_class, stem
 from memarena.memory.llm_memory import LLMMemory
 from memarena.llm.client import LLMResult, MockLLM
@@ -100,3 +100,72 @@ def test_llm_memory_prompts_and_statuses(bench):
     assert broken.answer(probe).status == "error"
     blank = LLMMemory(MockLLM(lambda r: {"answer": "", "confidence": "n/a"}))
     assert blank.answer(probe).text == ABSTAIN_TEXT
+
+
+def _full_system():
+    return HeuristicMemory(MemoryConfig(features=frozenset(FEATURES), top_k=10))
+
+
+def _crashing_system():
+    raise RuntimeError("cannot even start")
+
+
+def test_isolated_runner_matches_in_process_and_survives_a_dead_child(bench):
+    import functools
+
+    probes = bench.probes()[:20]
+    inside = run_system(_full_system(), probes)
+    outside = run_isolated(_full_system, probes, timeout=120)
+    assert {k: (a.text, a.status) for k, a in outside.items()} == {k: (a.text, a.status) for k, a in inside.items()}
+    dead = run_isolated(_crashing_system, probes[:3], timeout=60)
+    assert all(a.status == "error" and a.text == "" for a in dead.values())
+    part = functools.partial(HeuristicMemory, MemoryConfig(features=frozenset(["temporal"])))
+    assert len(run_isolated(part, probes[:2], timeout=60)) == 2
+
+
+def test_index_cache_never_serves_another_history():
+    """Two benchmarks can carry different histories under the same ids; answers must not depend on what ran before."""
+    from memarena.memory import heuristic
+
+    easy = GenConfig(n_streams=6, third_party_rate=0.0, negation_rate=0.0)
+    hard = GenConfig(n_streams=6, third_party_rate=1.0, negation_rate=1.0)
+    a, b = generate("shift", easy), generate("shift", hard)
+
+    def texts(bench):
+        mem = HeuristicMemory(MemoryConfig(features=frozenset(FEATURES)))
+        return [x.text for x in run_system(mem, bench.probes()).values()]
+
+    heuristic._CACHE._data.clear()
+    alone = texts(b)
+    heuristic._CACHE._data.clear()
+    texts(a)
+    assert texts(b) == alone
+
+
+def test_systems_receive_copies_they_cannot_use_to_reach_or_alter_the_evaluator():
+    import gc
+
+    from memarena.benchmark.schema import Instance
+    from memarena.memory.base import detached
+
+    bench = generate("copies", GenConfig(n_streams=2))
+    seen = {}
+
+    class Meddler:
+        name = "meddler"
+
+        def config_hash(self):
+            return "m"
+
+        def answer(self, probe):
+            seen[probe.probe_id] = any(isinstance(r, Instance) for r in gc.get_referrers(probe))
+            object.__setattr__(probe, "question", "?")
+            return Answer("x")
+
+    questions = [p.question for p in bench.probes()]
+    run_system(Meddler(), bench.probes())
+    assert not any(seen.values())
+    assert [p.question for p in bench.probes()] == questions
+    copies = detached(bench.probes())
+    assert [c.to_dict() for c in copies] == [p.to_dict() for p in bench.probes()]
+    assert copies[0].sessions is copies[1].sessions and copies[0].sessions is not bench.probes()[0].sessions

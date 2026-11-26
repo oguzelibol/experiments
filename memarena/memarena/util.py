@@ -43,9 +43,12 @@ def round_floats(obj: Any, nd: int = FLOAT_DECIMALS) -> Any:
 
 def canonical_json(obj: Any) -> str:
     """Deterministic JSON: sorted keys, no whitespace, ASCII only, rounded floats."""
-    return json.dumps(
-        round_floats(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    )
+    try:
+        return json.dumps(
+            round_floats(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False
+        )
+    except ValueError as exc:  # NaN or infinity: not JSON, and poison for every comparison downstream
+        raise ValueError("non-finite number in data that must be canonical JSON") from exc
 
 
 def sha256_hex(data: bytes | str) -> str:

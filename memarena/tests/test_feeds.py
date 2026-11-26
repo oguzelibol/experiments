@@ -79,3 +79,38 @@ def test_http_transport_matches_in_process_board():
         assert len(board) == 2
     finally:
         server.stop()
+
+
+def test_blobs_are_immutable_and_checked_on_load(tmp_path):
+    path = str(tmp_path / "board.jsonl")
+    board = Board(path)
+    h = board.put_blob({"answers": {"p1": "Lisbon"}})
+    got = board.get_blob(h)
+    got["answers"]["p1"] = "Porto"  # a reader scribbling on what it was handed
+    assert board.get_blob(h) == {"answers": {"p1": "Lisbon"}}
+    text = (tmp_path / "board.jsonl").read_text().replace("Lisbon", "Porto")
+    (tmp_path / "board.jsonl").write_text(text)
+    with pytest.raises(ValueError):
+        Board(path)  # the stored payload no longer matches its hash
+
+
+def test_board_refuses_non_finite_numbers():
+    board = Board()
+    with pytest.raises(ValueError):
+        board.post("a", "note", {"x": float("nan")})
+    with pytest.raises(ValueError):
+        board.put_blob({"x": float("inf")})
+    assert len(board) == 0
+
+
+def test_reserved_author_cannot_be_claimed_on_an_open_board():
+    board = Board()
+    server = BoardServer(board, reserved=("env",)).start()
+    try:
+        anon = BoardClient(server.url)
+        anon.post("someone", "note", {"text": "open boards accept this"})
+        with pytest.raises(ValueError):
+            anon.post("env", "clock", {"round": 99})
+    finally:
+        server.stop()
+    assert [p.author for p in board.read(0)] == ["someone"]

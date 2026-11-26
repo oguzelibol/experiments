@@ -32,7 +32,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 from ..util import canonical_json, sha256_hex
 
-__all__ = ["Post", "Board", "GENESIS", "POST_KINDS"]
+__all__ = ["Post", "Board", "AuthorBoard", "GENESIS", "POST_KINDS"]
 
 GENESIS = sha256_hex("memarena:genesis")
 
@@ -93,7 +93,7 @@ class Board:
         self._posts: list[Post] = []
         self._by_author: dict[str, list[int]] = {}
         self._inbox: dict[str, list[int]] = {}
-        self._blobs: dict[str, Any] = {}
+        self._blobs: dict[str, str] = {}  # content hash -> canonical JSON text
         self._lock = threading.RLock()
         self._path = path
         self.max_body_bytes = max_body_bytes
@@ -129,10 +129,10 @@ class Board:
         h = sha256_hex(encoded)
         with self._lock:
             if h not in self._blobs:
-                self._blobs[h] = json.loads(encoded)
+                self._blobs[h] = encoded
                 if self._path:
                     with open(self._path, "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"blob": h, "data": self._blobs[h]}, ensure_ascii=False) + "\n")
+                        fh.write(json.dumps({"blob": h, "data": json.loads(encoded)}, ensure_ascii=False) + "\n")
         return h
 
     # ------------------------------------------------------------- reading
@@ -140,7 +140,8 @@ class Board:
         with self._lock:
             if h not in self._blobs:
                 raise KeyError(f"unknown blob {h}")
-            return self._blobs[h]
+            encoded = self._blobs[h]
+        return json.loads(encoded)  # a fresh copy: no reader can alter what another reader sees
 
     def feed(self, author: str, since: int = 0, kinds: Iterable[str] | None = None, limit: int | None = None) -> list[Post]:
         """Posts by ``author`` with author_seq > ``since`` (oldest first)."""
@@ -222,7 +223,52 @@ class Board:
                     if post.to:
                         self._inbox.setdefault(post.to, []).append(post.seq - 1)
                 elif "blob" in rec:
-                    self._blobs[rec["blob"]] = rec["data"]
+                    encoded = canonical_json(rec["data"])
+                    if sha256_hex(encoded) != rec["blob"]:
+                        raise ValueError(f"stored blob {rec['blob'][:12]} does not match its hash")
+                    self._blobs[rec["blob"]] = encoded
         ok, why = self.verify()
         if not ok:
             raise ValueError(f"stored board failed verification: {why}")
+
+
+class AuthorBoard:
+    """One unit's connection to an in-process board: read anything, post only as itself.
+
+    Over HTTP the bearer token plays this role.  In process, handing each unit an
+    ``AuthorBoard`` gives the same guarantee: no unit can put words in another
+    unit's feed.
+    """
+
+    def __init__(self, board: Board, author: str):
+        self._board = board
+        self.author = author
+
+    def post(self, author: str, kind: str, body: Mapping, to: str | None = None, round: int = 0) -> Post:
+        if author != self.author:
+            raise PermissionError(f"{self.author} may not post as {author}")
+        return self._board.post(author, kind, body, to=to, round=round)
+
+    def put_blob(self, obj: Any) -> str:
+        return self._board.put_blob(obj)
+
+    def get_blob(self, h: str) -> Any:
+        return self._board.get_blob(h)
+
+    def feed(self, author: str, since: int = 0, kinds: Iterable[str] | None = None, limit: int | None = None) -> list[Post]:
+        return self._board.feed(author, since, kinds, limit)
+
+    def inbox(self, recipient: str, since_seq: int = 0) -> list[Post]:
+        return self._board.inbox(recipient, since_seq)
+
+    def read(self, since_seq: int = 0, kinds: Iterable[str] | None = None, limit: int | None = None) -> list[Post]:
+        return self._board.read(since_seq, kinds, limit)
+
+    def directory(self) -> dict[str, dict]:
+        return self._board.directory()
+
+    def head(self) -> tuple[int, str]:
+        return self._board.head()
+
+    def verify(self) -> tuple[bool, str]:
+        return self._board.verify()
