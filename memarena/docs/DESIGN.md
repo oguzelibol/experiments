@@ -91,7 +91,7 @@ key reveal, a swapped standard and an altered per-ability score; all are rejecte
 | Check | What it catches |
 |---|---|
 | Reference answers score 1.0 under every criterion | a broken harness or grader |
-| Empty, "I don't know", constant, echoed question, prompt injection, list of guesses stay at the floor | a grader that is too lenient |
+| Empty, "I don't know", constant, echoed question, prompt injection, list of guesses, pasted history, decline-then-guess all stay at the floor | a grader that is too lenient |
 | Probes carry no evaluator fields; ids are opaque | leakage |
 | Removing the history collapses the score | a benchmark that measures priors, or a system that ignores its memory |
 | Re-grading gives identical records | non-determinism |
@@ -100,11 +100,21 @@ key reveal, a swapped standard and an altered per-ability score; all are rejecte
 | Judges against 68 hand-labelled cases | judge error, reported separately for cases the rules were tuned on and fresh ones |
 | Cluster-robust interval next to the naive one | false precision when questions share a history |
 
-Two things this audit found during the build are worth recording. A response that simply echoed the
-question was earning credit on "which came first, A or B?" items, because the question contains its own
-answer; judges now reject echoes and check which alternative a response commits to. And a list of guesses
-was passing numeric questions under the lenient judge; a short run of numbers is now treated as working
-steps and a long one as guessing.
+Four things this audit found during the build are worth recording, because each was a way to score
+without answering:
+
+- **Echoing the question** earned credit on "which came first, A or B?" items, since the question contains
+  its own answer. Judges now reject echoes and check which alternative a response commits to.
+- **A list of guesses** passed numeric questions under the lenient judge. A short run of numbers is now
+  treated as working steps and a long one as guessing.
+- **Pasting the history back** contains every extractive answer. On real LongMemEval (oracle split) that
+  earns 36% under raw containment and 53% under a generous judge. The reporting judges now refuse to read a
+  response of that length as an answer, and it earns under 1%.
+- **"I don't know, but my guess is X"** collected credit on answerable and unanswerable questions alike.
+  Declining now only counts if no answer follows.
+
+The generous judge and the containment metric are kept in the criteria family because outside evaluators
+use them. They are not used for this project's own headline numbers.
 
 ### 2.5 Statistics
 
@@ -351,8 +361,10 @@ These were not specified. Each is a parameter.
 - **The offline memory system is a simulation stand-in.** On real LongMemEval it scores at the abstention
   floor, and the audit flags it. Results about societies are results about the mechanism in a synthetic world.
 - **Heuristic judges are approximations.** They agree with hand labels on 15 of 16 fresh cases per mode and
-  reject 2 of 500 real LongMemEval reference answers in strict mode. Use the LLM judge on real data, and
-  calibrate it on the exam first; `scripts/eval_benchmark.py` does that automatically.
+  reject 2 of 500 real LongMemEval reference answers in strict mode. They also refuse any response longer
+  than about 100 words, which is right for terse answers and wrong for a model that reasons at length. Use
+  the LLM judge on real data, and calibrate it on the exam first; `scripts/eval_benchmark.py` does that
+  automatically.
 - **Routing by question kind uses a regex classifier** that fits the synthetic questions. It does not fit
   real LongMemEval questions and would need to be a model there.
 - **The outside criterion is drawn from the same family the units know.** An evaluator outside that family

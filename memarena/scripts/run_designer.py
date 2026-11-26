@@ -78,7 +78,7 @@ def main() -> int:
         "notebook_head": designer.notebook.head,
         "self_verification": check,
         "wall_seconds": round(time.time() - t0, 1),
-        "reproduce": f"python scripts/verify_contest.py {args.out}",
+        "reproduce": f"python scripts/verify_contest.py {os.path.basename(os.path.normpath(args.out))}",
     }
     with open(os.path.join(args.out, "submission.json"), "w", encoding="utf-8") as fh:
         json.dump(submission, fh, indent=2, sort_keys=True)

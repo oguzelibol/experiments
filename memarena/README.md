@@ -105,5 +105,5 @@ memarena/
   designer/    design genome, search, notebook, live operation
 scripts/       evaluate a benchmark, download data, run and verify the designer, serve a board, run a unit
 contest/       the recorded designer run: notebook.jsonl and submission.json
-tests/         63 tests
+tests/         66 tests
 ```
