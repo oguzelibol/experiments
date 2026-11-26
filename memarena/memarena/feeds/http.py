@@ -67,10 +67,12 @@ class BoardServer:
                 url = urllib.parse.urlparse(self.path)
                 q = urllib.parse.parse_qs(url.query)
                 parts = [urllib.parse.unquote(p) for p in url.path.strip("/").split("/")]
-                since = int(q.get("since", ["0"])[0])
-                kinds = q.get("kinds", [""])[0].split(",") if q.get("kinds", [""])[0] else None
-                limit = int(q["limit"][0]) if "limit" in q else None
                 try:
+                    since = int(q.get("since", ["0"])[0])
+                    kinds = q.get("kinds", [""])[0].split(",") if q.get("kinds", [""])[0] else None
+                    limit = int(q["limit"][0]) if "limit" in q else None
+                    if since < 0 or (limit is not None and limit < 0):
+                        raise ValueError("since and limit must not be negative")
                     if parts == ["v1", "head"]:
                         seq, h = outer.board.head()
                         return self._send(200, {"seq": seq, "hash": h})

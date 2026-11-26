@@ -28,14 +28,17 @@ a JSON document, never as instructions.
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, Mapping
+
+from ..util import ConfigurationError
 
 from ..evalcore.criteria import CriteriaFamily
 from ..memory.heuristic import FEATURES, STYLES
 
 _CRITERIA = tuple(CriteriaFamily.default().ids)
 
-__all__ = ["LLMBrain", "BRAIN_SYSTEM", "BRAIN_SCHEMA"]
+__all__ = ["LLMBrain", "BackgroundBrain", "BRAIN_SYSTEM", "BRAIN_SCHEMA"]
 
 BRAIN_SYSTEM = f"""You steer one unit in a society of memory systems. Each unit answers questions about a \
 long conversation history, examines other units on the abilities it believes it is good at, and tries to be \
@@ -115,6 +118,15 @@ class LLMBrain:
 
     def decide(self, summary: Mapping) -> dict:
         self.calls += 1
+        try:
+            return self._decide(summary)
+        except ConfigurationError:
+            raise  # no credentials or no such model: the operator has to know
+        except Exception:  # noqa: BLE001 - any other failure leaves the unit on its policy
+            self.failures += 1
+            return {}
+
+    def _decide(self, summary: Mapping) -> dict:
         result = self.llm.complete(
             system=BRAIN_SYSTEM,
             prompt="Unit state:\n" + json.dumps(summary, ensure_ascii=False, indent=1, sort_keys=True),
@@ -128,3 +140,60 @@ class LLMBrain:
             self.failures += 1
             return {}  # the unit falls back to its policy
         return dict(result.parsed)
+
+
+class BackgroundBrain:
+    """Runs a slow brain off the unit's thread, so a model call never makes the unit miss its exams.
+
+    A unit that follows a clock has to keep answering exam posts.  A model
+    call can take longer than a round, so here ``decide`` never waits: it
+    returns the newest plan that has finished (or nothing) and, if no call is
+    under way, starts one on the state it was just given.  A plan therefore
+    takes effect a round or more after the state it was made for, and a unit
+    that hears nothing keeps to its policy.
+    """
+
+    def __init__(self, inner: Any):
+        self.inner = inner
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._ready: dict | None = None
+        self._fatal: BaseException | None = None
+        self.calls = 0
+        self.failures = 0
+        self.plans = 0
+
+    def _work(self, summary: Mapping) -> None:
+        try:
+            plan = self.inner.decide(summary)
+        except ConfigurationError as exc:
+            with self._lock:
+                self._fatal = exc
+            return
+        except Exception:  # noqa: BLE001
+            with self._lock:
+                self.failures += 1
+            return
+        with self._lock:
+            self._ready = dict(plan) if isinstance(plan, Mapping) else None
+
+    def decide(self, summary: Mapping) -> dict:
+        with self._lock:
+            if self._fatal is not None:
+                raise self._fatal
+            plan, self._ready = self._ready, None
+            busy = self._thread is not None and self._thread.is_alive()
+            if not busy:
+                self.calls += 1
+                self._thread = threading.Thread(target=self._work, args=(json.loads(json.dumps(summary, default=str)),), daemon=True)
+                self._thread.start()
+        if plan:
+            self.plans += 1
+        return plan or {}
+
+    def wait(self, timeout: float | None = None) -> None:
+        """Let a call that is under way finish (for tests and for a clean shutdown)."""
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+

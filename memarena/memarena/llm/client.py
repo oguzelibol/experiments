@@ -19,7 +19,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
 
-from ..util import hash_obj
+from ..util import ConfigurationError, hash_obj
 
 __all__ = [
     "LLMResult",
@@ -33,13 +33,11 @@ __all__ = [
 
 DEFAULT_MODEL = "claude-opus-5-5"
 
-# USD per million tokens (input, output); used only for cost reporting.
-_PRICES = {
-    "claude-fable-5-2": (8.0, 40.0),
-    "claude-opus-5-5": (4.0, 20.0),
-    "claude-sonnet-5-5": (2.0, 10.0),
-    "claude-haiku-5-5": (0.10, 0.50),
-}
+# Token counts reported per client.  No price is computed here: rates differ by model, by cache
+# reads and writes and by fallback, and a wrong dollar figure is worse than none.
+_USAGE_KEYS = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+# Stop reasons that mean the model finished what it had to say.
+_COMPLETE = ("end_turn", "stop_sequence")
 # Models for which the server-side refusal fallback parameter is offered.
 _FALLBACK_MODELS = {
     "claude-fable-5-2", "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
@@ -47,8 +45,8 @@ _FALLBACK_MODELS = {
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 
-class LLMConfigError(RuntimeError):
-    """The client is misconfigured (bad key, unknown model); retrying cannot help."""
+class LLMConfigError(ConfigurationError):
+    """The client is misconfigured (no or bad key, unknown model); retrying cannot help."""
 
 
 @dataclass(frozen=True)
@@ -122,16 +120,20 @@ class AnthropicClient:
         self.effort = effort
         self.use_fallbacks = (model in _FALLBACK_MODELS) if use_fallbacks is None else use_fallbacks
         self._lock = threading.Lock()
-        self.totals = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 0, "usd": 0.0}
+        self.totals = {"calls": 0, "failed_calls": 0, "served_by": {}, **dict.fromkeys(_USAGE_KEYS, 0)}
 
     def _record(self, usage: Mapping, served_model: str) -> None:
-        price_in, price_out = _PRICES.get(served_model, _PRICES.get(self.model, (0.0, 0.0)))
-        usd = (usage.get("input_tokens", 0) * price_in + usage.get("output_tokens", 0) * price_out) / 1e6
         with self._lock:
             self.totals["calls"] += 1
-            for k in ("input_tokens", "output_tokens", "cache_read_input_tokens"):
+            self.totals["served_by"][served_model] = self.totals["served_by"].get(served_model, 0) + 1
+            for k in _USAGE_KEYS:
                 self.totals[k] += int(usage.get(k, 0) or 0)
-            self.totals["usd"] += usd
+
+    def _failed(self, what: str) -> LLMResult:
+        with self._lock:
+            self.totals["calls"] += 1
+            self.totals["failed_calls"] += 1
+        return LLMResult(text=what, status="error", model=self.model)
 
     def complete(
         self,
@@ -159,53 +161,71 @@ class AnthropicClient:
                 kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
             else:
                 kwargs["system"] = system
+        request_id = None
         try:
             if self.use_fallbacks:
                 with self._client.beta.messages.stream(
                     betas=[_FALLBACK_BETA], fallbacks="default", **kwargs
                 ) as stream:
                     message = stream.get_final_message()
+                    request_id = getattr(stream, "request_id", None)
             else:
                 with self._client.messages.stream(**kwargs) as stream:
                     message = stream.get_final_message()
+                    request_id = getattr(stream, "request_id", None)
         except (anthropic.AuthenticationError, anthropic.PermissionDeniedError, anthropic.NotFoundError) as exc:
             raise LLMConfigError(f"{type(exc).__name__}: {exc}") from exc
         except anthropic.BadRequestError as exc:
-            return LLMResult(text=f"bad_request: {exc}", status="error", model=self.model)
+            return self._failed(f"bad_request: {exc}")
         except anthropic.RateLimitError as exc:
-            return LLMResult(text=f"rate_limited: {exc}", status="error", model=self.model)
+            return self._failed(f"rate_limited: {exc}")
         except anthropic.APIStatusError as exc:
-            return LLMResult(text=f"api_status_{exc.status_code}: {exc}", status="error", model=self.model)
+            return self._failed(f"api_status_{exc.status_code}: {exc}")
         except anthropic.APIConnectionError as exc:
-            return LLMResult(text=f"connection: {exc}", status="error", model=self.model)
+            return self._failed(f"connection: {exc}")
+        except TypeError as exc:
+            if "authentication" in str(exc).lower() or "api_key" in str(exc).lower():
+                raise LLMConfigError(f"no usable credentials: {exc}") from exc
+            return self._failed(f"client_error: TypeError: {exc}")
+        except Exception as exc:  # noqa: BLE001 - a stream that drops or ends oddly is one failed call, not the end of the run
+            return self._failed(f"transport: {type(exc).__name__}: {exc}")
 
         text = "".join(block.text for block in message.content if block.type == "text")
         usage_obj = message.usage
-        usage = {
-            k: int(getattr(usage_obj, k, 0) or 0)
-            for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-        }
+        usage = {k: int(getattr(usage_obj, k, 0) or 0) for k in _USAGE_KEYS}
         served = getattr(message, "model", self.model) or self.model
         self._record(usage, served)
-        request_id = getattr(message, "_request_id", None)
-        if message.stop_reason == "refusal":
+        request_id = request_id or getattr(message, "_request_id", None)
+        stop = message.stop_reason
+        if stop == "refusal":
             return LLMResult(text=text, status="refused", model=served, usage=usage, request_id=request_id)
-        status = "truncated" if message.stop_reason == "max_tokens" else "ok"
+        if stop in ("max_tokens", "model_context_window_exceeded"):
+            return LLMResult(text=text, status="truncated", model=served, usage=usage, request_id=request_id)
+        if stop not in _COMPLETE:
+            # no stop reason, or one this code does not know: the reply cannot be taken as complete
+            return LLMResult(text=text, status="error", model=served, usage=usage, request_id=request_id)
         parsed = None
-        if json_schema is not None and status == "ok":
+        if json_schema is not None:
             try:
                 parsed = json.loads(text)
             except json.JSONDecodeError:
                 return LLMResult(text=text, status="error", model=served, usage=usage, request_id=request_id)
-        return LLMResult(text=text, parsed=parsed, status=status, model=served, usage=usage, request_id=request_id)
+        return LLMResult(text=text, parsed=parsed, status="ok", model=served, usage=usage, request_id=request_id)
 
 
 class CachedLLM:
-    """Content-addressed transcript cache around any ``LLMClient``.
+    """A transcript of every completed call, replayed when the same request is made again.
 
     The key covers the model and every request field, so an identical request
-    always returns the recorded response.  Only ``ok`` results are stored.  The
-    JSONL file is the audit trail for LLM-judged evaluations.
+    always returns the recorded response.  Only ``ok`` results are stored.  Each
+    row keeps the request itself and the provider's request id next to the
+    reply, so a reader can see what was asked and can ask the provider's logs
+    about a particular call.
+
+    A transcript makes an LLM-judged evaluation repeatable; it does not prove
+    the replies came from a model.  ``replayed`` and ``live`` say how many
+    answers in this run came from the file and how many from calls, and a
+    verifier with its own credentials should re-ask a sample.
     """
 
     def __init__(self, inner: Any, path: str | None = None):
@@ -216,22 +236,33 @@ class CachedLLM:
         self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
+        self.skipped_lines = 0
         if path and os.path.exists(path):
             with open(path, "r", encoding="utf-8") as fh:
                 for line in fh:
                     line = line.strip()
-                    if line:
+                    if not line:
+                        continue
+                    try:
                         rec = json.loads(line)
                         self._mem[rec["key"]] = rec["result"]
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        self.skipped_lines += 1  # a line cut short by an interrupted run
+
+    @property
+    def replayed(self) -> int:
+        return self.hits
+
+    @property
+    def live(self) -> int:
+        return self.misses
 
     def key(self, **request) -> str:
         return hash_obj({"model": self.model, **request})
 
     def complete(self, *, system, prompt, max_tokens=16000, json_schema=None, effort=None, purpose="", cache_system=False):
-        key = self.key(
-            system=system, prompt=prompt, max_tokens=max_tokens,
-            json_schema=json_schema, effort=effort, purpose=purpose,
-        )
+        request = dict(system=system, prompt=prompt, max_tokens=max_tokens, json_schema=json_schema, effort=effort, purpose=purpose)
+        key = self.key(**request)
         with self._lock:
             rec = self._mem.get(key)
         if rec is not None:
@@ -241,16 +272,13 @@ class CachedLLM:
                 usage=rec.get("usage", {}), request_id=rec.get("request_id"), cached=True,
             )
         self.misses += 1
-        result = self.inner.complete(
-            system=system, prompt=prompt, max_tokens=max_tokens, json_schema=json_schema,
-            effort=effort, purpose=purpose, cache_system=cache_system,
-        )
+        result = self.inner.complete(**request, cache_system=cache_system)
         if result.status == "ok":
             with self._lock:
                 self._mem[key] = result.to_dict()
                 if self.path:
                     with open(self.path, "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"key": key, "result": result.to_dict()}, ensure_ascii=False) + "\n")
+                        fh.write(json.dumps({"key": key, "model": self.model, "request": request, "result": result.to_dict()}) + "\n")
         return result
 
 

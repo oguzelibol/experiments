@@ -24,7 +24,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from ..actors.protocol import CLOCK_AUTHOR, called_off, check_result, exam_posts, settle, verify_result
+from ..actors.protocol import CLOCK_AUTHOR, ExamIndex, check_result, round_at, settle, verify_result
 from ..evalcore.calibration import EXTERNAL_LOSS, AsymmetricLoss
 from ..evalcore.criteria import CriteriaFamily
 from ..util import sha256_hex
@@ -73,7 +73,7 @@ def _signal(post: Any) -> Signal | None:
             capability={c: (float(s), int(n)) for c, (s, n) in b["capability"].items()},
             round=post.round, loss=float(b.get("loss", 0.0)), seq=post.seq,
         )
-    except (KeyError, TypeError, ValueError, AttributeError):
+    except Exception:  # noqa: BLE001 - a post that cannot be read is not a signal
         return None
 
 
@@ -87,102 +87,82 @@ class Audit:
     """What the public record establishes, re-derived by the reader."""
 
     signals: list  # one per settled exam, with the numbers settled here
-    cheats: set  # examiners that published a result which does not verify
+    cheats: set  # examiners that published a result which does not match what its exam settles to
     bad: set  # the seqs of those results
-    settled_without_result: int  # exams settled from the record although no valid result was published
-    walkouts: dict  # examiner -> exams it left unfinished after the paper was fixed
-    completion: dict  # examiner -> share of the exams it started that were settled
+    settled_without_result: int  # exams settled from the record although no good result was published
+    walkouts: dict  # examiner -> exams it abandoned or spoiled once it knew the paper
+    completion: dict  # examiner -> share of the exams it owed that were settled
 
 
-def audit_record(
-    board: Any, family: CriteriaFamily, cache: dict | None = None,
-    exam_size: Sequence[int] | None = None, clock_author: str = CLOCK_AUTHOR,
-) -> Audit:
-    """Verify and settle everything on the board before anything is built on it.
+def audit_record(board: Any, family: CriteriaFamily, cache: dict | None = None, clock_author: str = CLOCK_AUTHOR) -> Audit:
+    """Settle everything on the board before anything is built on it.
 
-    * Every published result is checked; one that does not verify marks its
-      examiner as a cheat and is discarded.
-    * Every exam whose keys are public is settled here whether or not its
-      examiner published a (valid) result, so keeping a result back, or
-      publishing a false one, does not change what the society learns.
-    * An exam counts once, however many results are posted about it.
-    * An exam the examiner left unfinished after the paper was fixed, without
-      showing that no paper could be drawn (``exam_size`` is needed to check
-      that), is a walkout.  So is one it spoiled, by revealing keys that settle
-      nothing.  An examiner has until the end of the following round.
+    * Every exam is read off the chain and settled here, whether or not its
+      examiner published a result, so keeping a result back, or publishing a
+      false one, does not change what the society learns.  An exam counts once.
+    * Every published result is compared with what its exam settles to; one
+      that does not match, or was published before its exam was over, marks
+      its examiner as a cheat.
+    * An exam the examiner abandoned or spoiled once it knew the paper is a
+      walkout.  One it called off by showing that no paper could be drawn is
+      not.
 
-    ``cache`` lets repeated calls skip what was already settled.
+    A verdict that is final never changes, so two readers of the same chain
+    agree, with or without ``cache`` (which only saves work across calls).
     """
     cache = cache if cache is not None else {}
+    index = ExamIndex(board, clock_author)
+    verdicts: dict[tuple[str, str, str], Any] = {}
     signals: list[Signal] = []
+    walkouts: dict[str, int] = {}
+    for key in index.exams:
+        verdict = cache.get(("exam",) + key)
+        if verdict is None:
+            verdict = settle(board, family, *key, index=index, clock_author=clock_author)
+            if not verdict.pending:
+                cache[("exam",) + key] = verdict
+        verdicts[key] = verdict
+        if verdict.ok:
+            signals.append(Signal(
+                xid=verdict.xid, examiner=verdict.examiner, examinee=verdict.examinee, score=verdict.score,
+                n=verdict.n_items, capability=dict(verdict.capability), round=round_at(index.clocks, verdict.final_seq),
+                loss=verdict.loss, seq=verdict.final_seq, paper=verdict.paper,
+            ))
+        elif verdict.fault == "examiner" and not verdict.pending:
+            walkouts[key[0]] = walkouts.get(key[0], 0) + 1
+    signals.sort(key=lambda s_: s_.seq)
+
     cheats: set[str] = set()
     bad: set[int] = set()
-    seen: set[tuple[str, str, str]] = set()
-
-    def add(verdict, post) -> None:
-        seen.add((verdict.examiner, verdict.examinee, verdict.xid))
-        signals.append(
-            Signal(
-                xid=verdict.xid, examiner=verdict.examiner, examinee=verdict.examinee, score=verdict.score,
-                n=verdict.n_items, capability=dict(verdict.capability), round=post.round, loss=verdict.loss, seq=post.seq,
-                paper=verdict.paper,
-            )
-        )
-
+    reported: set[tuple[str, str, str]] = set()
     for post in board.read(0, kinds=["exam.result"]):
-        verdict = cache.get(post.seq)
-        if verdict is None:
-            verdict = cache[post.seq] = check_result(board, post, family, clock_author)
-        if not verdict.ok:
+        good = cache.get(post.seq)
+        key = None
+        if good is None:
+            try:
+                body = post.body if isinstance(post.body, Mapping) else {}
+                key = (post.author, body.get("examinee"), body.get("xid"))
+                settled = verdicts.get(key) if all(isinstance(x, str) for x in key) else None
+                if settled is None or not settled.ok:
+                    # nothing settles from that exam (yet): there was nothing to publish
+                    good = (False, None)
+                else:
+                    good = (check_result(board, post, family, clock_author, settled=settled).ok, key)
+            except Exception:  # noqa: BLE001 - a result that cannot be read is not a good one
+                good = (False, None)
+            cache[post.seq] = good
+        if good[0]:
+            reported.add(good[1])
+        else:
             cheats.add(post.author)
             bad.add(post.seq)
-        elif (verdict.examiner, verdict.examinee, verdict.xid) not in seen:
-            add(verdict, post)
-
-    settled_without_result = 0
-    for post in board.read(0, kinds=["exam.keys"]):
-        xid = post.body.get("xid") if isinstance(post.body, Mapping) else None
-        key = (post.author, post.to, xid)
-        if key in seen or not isinstance(xid, str) or not isinstance(post.to, str):
-            continue
-        verdict = cache.get(("settled",) + key)
-        if verdict is None:
-            verdict = settle(board, family, post.author, post.to, xid, clock_author=clock_author)
-            if verdict.ok or not verdict.pending:
-                cache[("settled",) + key] = verdict
-        if verdict.ok:
-            add(verdict, post)
-            settled_without_result += 1
-
-    # Exams an examiner started and then left unfinished or spoiled, once it knew the paper.
-    walkouts: dict[str, int] = {}
-    clocks = [p.seq for p in board.feed(clock_author, kinds=["clock"])]
-    counted: set[tuple[str, str, str]] = set()
-    for post in board.read(0, kinds=["exam.nonce"]):
-        xid = post.body.get("xid") if isinstance(post.body, Mapping) else None
-        key = (post.to, post.author, xid)
-        if key in seen or key in counted or not isinstance(xid, str) or not isinstance(post.to, str):
-            continue
-        if sum(1 for c in clocks if c > post.seq) < 2:
-            continue  # the examiner has the rest of that round and all of the next to finish
-        posts, _theirs, _ours = exam_posts(board, post.to, post.author, xid)
-        if posts.nonce is None or posts.nonce.seq != post.seq:
-            continue  # not the seed share of an exam that was properly started
-        counted.add(key)
-        if posts.keys is not None:
-            # keys are out but nothing settles: every reason for that lies with the examiner
-            spoiled = cache.get(("settled",) + key)
-            if spoiled is None or spoiled.ok or spoiled.pending:
-                continue
-        elif exam_size is not None and called_off(board, post.to, post.author, xid, exam_size):
-            continue
-        walkouts[post.to] = walkouts.get(post.to, 0) + 1
 
     done: dict[str, int] = {}
     for s_ in signals:
         done[s_.examiner] = done.get(s_.examiner, 0) + 1
     completion = {e: done.get(e, 0) / (done.get(e, 0) + w) for e, w in walkouts.items()}
-    return Audit(signals, cheats, bad, settled_without_result, walkouts, completion)
+    unreported = sum(1 for s_ in signals if (s_.examiner, s_.examinee, s_.xid) not in reported)
+    return Audit(signals, cheats, bad, unreported, walkouts, completion)
 
 
 def audit_board(board: Any, family: CriteriaFamily, cache: dict | None = None) -> tuple[list[Signal], set[str], set[int]]:
@@ -215,24 +195,29 @@ def confirmed_cheats(board: Any, family: CriteriaFamily) -> tuple[set[str], set[
     return cheats, bad_results
 
 
-def published_since(board: Any, units: Sequence[str]) -> dict[str, int]:
+def published_since(board: Any, units: Sequence[str], clock_author: str = CLOCK_AUTHOR) -> dict[str, int]:
     """For each unit, the round from which its current design has been in use, as the board shows it.
 
     A unit's profile carries a version number that it raises when it adopts a
     new design.  Signals about an earlier version say nothing about the unit as
-    it is now.  The round is that of the first profile carrying the latest
-    version; a unit's private state is never consulted, so a reader with a copy
+    it is now.  The round is the one in force (by the clock, not by what the
+    post says of itself) when the first profile carrying the latest version was
+    posted.  A unit's private state is never consulted, so a reader with a copy
     of the board gets the same answer.
     """
+    clocks = []
+    for post in board.feed(clock_author, kinds=["clock"]):
+        number = post.body.get("round") if isinstance(post.body, Mapping) else None
+        clocks.append((post.seq, number if isinstance(number, int) and not isinstance(number, bool) else len(clocks) + 1))
     out: dict[str, int] = {}
     for unit in units:
-        profiles = board.feed(unit, kinds=["profile"])
+        profiles = [p for p in board.feed(unit, kinds=["profile"]) if isinstance(p.body, Mapping)]
         since = 0
         if profiles:
-            latest = profiles[-1].body.get("version") if isinstance(profiles[-1].body, Mapping) else None
+            latest = profiles[-1].body.get("version")
             for post in profiles:
-                if isinstance(post.body, Mapping) and post.body.get("version") == latest:
-                    since = int(post.round)
+                if post.body.get("version") == latest:
+                    since = round_at(clocks, post.seq)
                     break
         out[unit] = since
     return out

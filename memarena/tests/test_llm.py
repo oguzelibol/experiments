@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -7,7 +8,10 @@ from memarena.benchmark.schema import AnswerKey
 from memarena.evalcore.audit import judge_exam
 from memarena.evalcore.judge_exam import JUDGE_EXAM
 from memarena.evalcore.judges import HeuristicJudge, LLMJudge
+from memarena.benchmark.synthetic import GenConfig, generate
 from memarena.llm.client import CachedLLM, LLMResult, MockLLM
+from memarena.memory.base import run_system
+from memarena.memory.llm_memory import LLMMemory
 
 KEY = AnswerKey("p", "single-session-user", "Lisbon")
 
@@ -137,3 +141,96 @@ def test_anthropic_client_request_shape():
     haiku.complete(system=None, prompt="hi")
     assert "fallbacks" not in captured[-1]["body"]
     assert client.totals["calls"] == 2
+
+
+def _sse(stop, text='{"verdict":"correct","reason":"ok"}', model="claude-opus-5-5", events=True):
+    out = [
+        {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model,
+                                              "content": [], "stop_reason": None, "stop_sequence": None,
+                                              "usage": {"input_tokens": 11, "output_tokens": 1}}},
+        {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}},
+        {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}},
+        {"type": "content_block_stop", "index": 0},
+    ]
+    if stop is not None:
+        out.append({"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": None}, "usage": {"output_tokens": 7}})
+    out.append({"type": "message_stop"})
+    return "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in out).encode() if events else b""
+
+
+def test_a_reply_that_did_not_finish_is_not_taken_as_an_answer_and_a_dropped_stream_is_one_failed_call(tmp_path):
+    anthropic = pytest.importorskip("anthropic")
+    hx = pytest.importorskip("httpx2")
+    from memarena.llm.client import AnthropicClient, LLMConfigError
+
+    mode = {"stop": "end_turn"}
+
+    def handler(request):
+        if mode["stop"] == "reset":
+            raise hx.ReadError("connection reset by peer", request=request)
+        if mode["stop"] == "empty":
+            return hx.Response(200, headers={"content-type": "text/event-stream"}, content=b"")
+        return hx.Response(200, headers={"content-type": "text/event-stream", "request-id": "req_test_1"}, content=_sse(mode["stop"]))
+
+    client = AnthropicClient(api_key="sk-test-not-real", http_client=anthropic.DefaultHttpxClient(transport=hx.MockTransport(handler)), max_retries=0)
+    done = client.complete(system=None, prompt="hello")
+    assert done.status == "ok" and done.request_id == "req_test_1"
+    for stop, want in (("max_tokens", "truncated"), ("model_context_window_exceeded", "truncated"), (None, "error"),
+                       ("some_new_reason", "error"), ("reset", "error"), ("empty", "error")):
+        mode["stop"] = stop
+        assert client.complete(system=None, prompt="hello").status == want, stop
+    assert client.totals["failed_calls"] >= 2 and "usd" not in client.totals
+    assert client.totals["served_by"] == {"claude-opus-5-5": client.totals["calls"] - client.totals["failed_calls"]}
+    # only complete replies are written down, with the request and the provider's id next to them
+    mode["stop"] = "end_turn"
+    path = str(tmp_path / "t.jsonl")
+    cached = CachedLLM(client, path)
+    cached.complete(system="s", prompt="p", purpose="judge")
+    mode["stop"] = None
+    cached.complete(system="s", prompt="unfinished", purpose="judge")
+    rows = [json.loads(line) for line in open(path)]
+    assert len(rows) == 1 and rows[0]["request"]["prompt"] == "p" and rows[0]["result"]["request_id"] == "req_test_1"
+    # a transcript cut short by an interrupted run still loads, and replies read from it are counted as such
+    with open(path, "a") as fh:
+        fh.write('{"key": "abc", "resu')
+    again = CachedLLM(MockLLM(lambda r: pytest.fail("should not be called")), path)
+    again.model = cached.model
+    assert again.complete(system="s", prompt="p", purpose="judge").cached and (again.replayed, again.live, again.skipped_lines) == (1, 0, 1)
+    # no credentials is a configuration error, not a row of failed answers
+    monkey_env = {k: os.environ.pop(k) for k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN") if k in os.environ}
+    try:
+        try:
+            bare = AnthropicClient(http_client=anthropic.DefaultHttpxClient(transport=hx.MockTransport(handler)), max_retries=0)
+            with pytest.raises(LLMConfigError):
+                bare.complete(system=None, prompt="hello")
+                pytest.skip("credentials were found by the SDK from another source")
+        except LLMConfigError:
+            pass
+    finally:
+        os.environ.update(monkey_env)
+
+
+def test_configuration_errors_stop_a_run_instead_of_filling_it_with_error_rows():
+    from memarena.llm.client import LLMConfigError
+
+    def broken(request):
+        raise LLMConfigError("no usable credentials")
+
+    bench = generate("cfg", GenConfig(n_streams=1, questions_per_stream=3))
+    with pytest.raises(LLMConfigError):
+        run_system(LLMMemory(MockLLM(broken)), bench.probes())
+    # a reply that was cut off is reported as a failure row, never graded as a fragment
+    cut = LLMMemory(MockLLM(lambda r: LLMResult(text='{"answer": "Mar', status="truncated")))
+    rows = run_system(cut, bench.probes())
+    assert all(a.status == "error" and a.text == "" for a in rows.values())
+    # the history is marked for the provider's cache only when asked to
+    seen = []
+
+    class Spy(MockLLM):
+        def complete(self, **kw):
+            seen.append(kw["cache_system"])
+            return super().complete(**kw)
+
+    for flag in (False, True):
+        run_system(LLMMemory(Spy(lambda r: {"answer": "x", "confidence": 0.5}), mode="full_context", cache_history=flag), bench.probes()[:1])
+    assert seen == [False, True]

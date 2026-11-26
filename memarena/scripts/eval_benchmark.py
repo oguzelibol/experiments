@@ -60,6 +60,9 @@ def main() -> int:
     ap.add_argument("--votes", type=int, default=1)
     ap.add_argument("--out", default=None)
     ap.add_argument("--skip-audit", action="store_true")
+    ap.add_argument("--min-judge-kappa", type=float, default=0.6,
+                    help="with --judge llm: stop unless the judge agrees with the hand labels at least this well")
+    ap.add_argument("--force", action="store_true", help="report scores even if the judge fails its calibration")
     ap.add_argument("--salt", default=None,
                     help="secret that keys probe ids and question order for public benchmarks; default: random per run")
     ap.add_argument("--isolate", action="store_true",
@@ -76,14 +79,31 @@ def main() -> int:
         bench = bench.subset([i.probe_id for i in bench.instances[: args.limit]])
 
     llm_totals = {}
+    transcripts = {}
     if args.memory == "llm" or args.judge == "llm":
-        from memarena.llm.client import AnthropicClient, CachedLLM
+        from memarena.llm.client import AnthropicClient, CachedLLM, LLMConfigError
         from memarena.memory.llm_memory import LLMMemory
 
+        if args.out:
+            os.makedirs(args.out, exist_ok=True)
+        try:  # find out now that the model cannot be reached, not after a table of zeros
+            first = AnthropicClient(model=args.model, max_retries=1, timeout=120.0).complete(
+                system=None, prompt="Reply with the single word: ready", max_tokens=64, effort="low", purpose="preflight")
+        except LLMConfigError as exc:
+            print(f"cannot use the model: {exc}", file=sys.stderr)
+            return 2
+        if first.status != "ok":
+            print(f"cannot use the model: the first call came back as {first.status}: {first.text[:200]}", file=sys.stderr)
+            return 2
+
     if args.memory == "llm":
-        reader = AnthropicClient(model=args.model)
-        system = LLMMemory(reader, mode=args.mode, top_k_sessions=args.top_k)
-        llm_totals["reader"] = reader.totals
+        reader_client = AnthropicClient(model=args.model)
+        # every completed reader call is written down as it arrives, so an interrupted run loses nothing
+        reader = CachedLLM(reader_client, os.path.join(args.out, "reader_transcript.jsonl") if args.out else None)
+        shared = len({i.probe.haystack_id for i in bench}) < len(bench)
+        system = LLMMemory(reader, mode=args.mode, top_k_sessions=args.top_k, cache_history=shared)
+        llm_totals["reader"] = reader_client.totals
+        transcripts["reader"] = reader
     else:
         feats = FEATURES if args.features == "all" else tuple(f for f in args.features.split(",") if f)
         system = HeuristicMemory(MemoryConfig(features=frozenset(feats), top_k=args.top_k))
@@ -92,15 +112,22 @@ def main() -> int:
     if args.judge == "llm":
         judge_client = AnthropicClient(model=args.judge_model or args.model, effort="low")
         cache_path = os.path.join(args.out, "judge_transcript.jsonl") if args.out else None
-        if args.out:
-            os.makedirs(args.out, exist_ok=True)
         cached = CachedLLM(judge_client, cache_path)
         judges = {f"judge_{m}": LLMJudge(cached, mode=m, votes=args.votes) for m in ("lenient", "strict", "generous", "graded")}
         llm_totals["judge"] = judge_client.totals
+        transcripts["judge"] = cached
         print("calibrating the judge on the hand-labelled exam before trusting it ...", flush=True)
+        calibration = {}
         for mode, target in (("lenient", "official"), ("strict", "strict")):
             res = judge_exam(judges[f"judge_{mode}"], target)
+            calibration[mode] = {k: res[k] for k in ("n", "accuracy", "kappa", "errors")}
             print(f"  {res['judge']}: accuracy {res['accuracy']} kappa {res['kappa']} errors {res['errors']} misses {res['misses']}")
+        weak = [m for m, r in calibration.items() if r["kappa"] < args.min_judge_kappa or r["errors"] > 0.05 * r["n"]]
+        if weak and not args.force:
+            print(f"the judge does not agree with the hand labels well enough ({', '.join(weak)}: kappa below "
+                  f"{args.min_judge_kappa} or too many failed calls). No score is reported. Use --force to go on anyway.",
+                  file=sys.stderr)
+            return 3
 
     family = CriteriaFamily.default()
     module = EvaluationModule(Standard({"judge_lenient|detect|micro": 1.0}), family, judges)
@@ -125,10 +152,18 @@ def main() -> int:
         "truncated": report.n_truncated, "judge_errors": report.n_judge_errors,
         "seconds_answering": round(run_seconds, 2), "evaluator": module.fingerprint(),
         "judges": {k: j.spec() for k, j in judges.items()}, "scores": {}, "per_type": {}, "llm_usage": llm_totals,
+        # how many model replies were read from a transcript file and how many came from calls made now
+        "llm_replies": {name: {"replayed": t.replayed, "live": t.live, "skipped_lines": t.skipped_lines} for name, t in transcripts.items()},
         "receipt": dict(evaluation.receipt),
     }
     print(f"\n{bench.name}: {report.n_items} questions, system {system.name}")
     print(f"not answered: {report.n_not_answered}   truncated: {report.n_truncated}   judge errors: {report.n_judge_errors}")
+    for name, t in transcripts.items():
+        print(f"{name}: {t.live} replies from calls made now, {t.replayed} read from the transcript file")
+    if report.n_not_answered:
+        reasons = sorted({str(a.meta.get("error"))[:120] for a in answers.values() if a.status != "ok" and a.meta.get("error")})
+        if reasons:
+            print("why answers are missing: " + " | ".join(reasons[:3]))
     cluster_of = bench.clusters()  # questions whose histories overlap count as one unit
     for cid in HEADLINES:
         rows = [(cluster_of[it.probe_id], s) for it, inc, s in report.item_scores(cid) if inc]
@@ -165,7 +200,7 @@ def main() -> int:
                     "probe_id": it.probe_id, "question_type": it.question_type, "is_abstention": it.is_abstention,
                     "status": it.status, "question": inst.probe.question, "response": ans.text if ans else None,
                     "gold": inst.key.answer, "scores": {c: it.score(family.get(c))[1] for c in HEADLINES},
-                    "judge_errors": list(it.judge_errors),
+                    "judge_errors": list(it.judge_errors), "error": (ans.meta.get("error") if ans else None),
                 }
                 (bad if it.status in ("missing", "error", "timeout", "refused") else ok).write(json.dumps(row, ensure_ascii=False) + "\n")
         with open(os.path.join(args.out, "summary.json"), "w", encoding="utf-8") as fh:

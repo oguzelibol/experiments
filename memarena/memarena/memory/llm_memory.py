@@ -74,11 +74,16 @@ class LLMMemory:
         top_k_sessions: int = 10,
         effort: str | None = None,
         name: str | None = None,
+        cache_history: bool = False,
     ):
         if mode not in ("retrieve", "full_context"):
             raise ValueError("mode must be 'retrieve' or 'full_context'")
         self.llm = llm
         self.mode = mode
+        # In full-context mode the history can be marked for the provider's prompt cache.  That pays
+        # only when several questions share one history (LoCoMo, the generated benchmark); where
+        # every question has its own (LongMemEval) it only adds the cost of writing the cache.
+        self.cache_history = cache_history
         self.top_k_sessions = top_k_sessions
         self.effort = effort
         self.name = name or f"llm-memory:{mode}:{getattr(llm, 'model', 'unknown')}"
@@ -120,13 +125,16 @@ class LLMMemory:
             )
         result = self.llm.complete(
             system=system, prompt=prompt, json_schema=_SCHEMA, max_tokens=16000,
-            effort=self.effort, purpose="memory-reader", cache_system=shared_history,
+            effort=self.effort, purpose="memory-reader",
+            # Caching the history only pays when another question reads the same one.
+            cache_system=shared_history and self.cache_history,
         )
         meta = {"sessions_used": len(selected), "model": result.model, "usage": dict(result.usage)}
         if result.status == "refused":
             return Answer("", 0.0, status="refused", meta=meta)
         if result.status == "truncated":
-            return Answer(result.text, 0.0, status="truncated", meta=meta)
+            # A reply cut off mid-way is a fragment of JSON, not an answer: it is reported, never graded.
+            return Answer("", 0.0, status="error", meta={**meta, "error": "the reply was cut off before the answer was complete"})
         if result.status != "ok" or not isinstance(result.parsed, dict):
             return Answer("", 0.0, status="error", meta={**meta, "error": result.text[:300]})
         text = str(result.parsed.get("answer", "")).strip()

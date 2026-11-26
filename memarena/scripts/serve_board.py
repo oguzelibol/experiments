@@ -27,7 +27,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
-    ap.add_argument("--tokens", help="JSON file mapping bearer token -> author (include one for the clock author 'env')")
+    ap.add_argument("--tokens", help="JSON file mapping bearer token -> author, one per unit (none for 'env': this process posts the clock itself)")
     ap.add_argument("--insecure", action="store_true",
                     help="run WITHOUT tokens: anyone who can reach the port can post as anyone. For local experiments only")
     ap.add_argument("--store", help="JSONL file to persist the board to")

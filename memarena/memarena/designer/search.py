@@ -55,6 +55,7 @@ _METRIC_KEYS = (
     "outside_score", "estimate_report", "estimate_error", "estimate_loss", "champion_regret",
     "mean_true_first", "mean_true_last", "best_single_true", "esteem_validity",
     "reputation_validity", "exchanges", "mean_peer_loss", "adoptions", "audit_fails",
+    "results_posted", "settled_without_result", "walkouts",
 )
 
 # The notebook stores floats to six decimals, so a recorded number and its

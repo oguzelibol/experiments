@@ -24,6 +24,7 @@ import time
 from typing import Callable, Iterable, Mapping, Protocol, Sequence
 
 from ..benchmark.schema import Answer, Probe, Session, Turn
+from ..util import ConfigurationError
 
 __all__ = ["MemorySystem", "run_system", "run_isolated", "detached", "ABSTAIN_TEXT"]
 
@@ -67,6 +68,8 @@ def run_system(system: MemorySystem, probes: Iterable[Probe]) -> dict[str, Answe
             ans = system.answer(probe)
             if not isinstance(ans, Answer):
                 raise TypeError(f"system returned {type(ans).__name__}, expected Answer")
+        except ConfigurationError:
+            raise  # no credentials, no such model: every further probe would fail the same way
         except Exception as exc:  # noqa: BLE001 - any failure is a harness-visible error row
             ans = Answer(text="", confidence=0.0, status="error", meta={"error": f"{type(exc).__name__}: {exc}"})
         elapsed = time.perf_counter() - start

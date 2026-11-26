@@ -51,7 +51,7 @@ def _git(out_dir: str, run: Callable[..., Any], *arguments: str) -> str:
     return done.stdout.strip()
 
 
-def git_anchor(out_dir: str, run: Callable[..., Any] = subprocess.run) -> Callable[[Notebook], dict]:
+def git_anchor(out_dir: str, run: Callable[..., Any] = subprocess.run, trailers: Sequence[str] = ()) -> Callable[[Notebook], dict]:
     """An anchor that publishes the notebook with git, in the repository that contains ``out_dir``.
 
     It runs when the pre-registration is the notebook's last entry: add the
@@ -60,13 +60,17 @@ def git_anchor(out_dir: str, run: Callable[..., Any] = subprocess.run) -> Callab
     fails raises ``AnchorFailed``, which stops the run: a pre-registration that
     is not public is no evidence of when it was made.  The receipt names the
     commit and the notebook's path in the repository, so that others can fetch
-    exactly that copy.
+    exactly that copy.  ``trailers`` are lines added at the end of the commit
+    message (a repository's attribution lines, for example).
     """
     def anchor(notebook: Notebook) -> dict:
         name = os.path.basename(notebook.path)
         design_hash = notebook.entries[-1]["body"]["design_hash"]
         _git(out_dir, run, "add", name)
-        _git(out_dir, run, "commit", "-m", f"Pre-register design {design_hash} (notebook head {notebook.head[:12]})", "--", name)
+        message = f"Pre-register design {design_hash} (notebook head {notebook.head[:12]})"
+        if trailers:
+            message += "\n\n" + "\n".join(trailers)
+        _git(out_dir, run, "commit", "-m", message, "--", name)
         _git(out_dir, run, "push")
         commit, prefix = _git(out_dir, run, "rev-parse", "HEAD"), _git(out_dir, run, "rev-parse", "--show-prefix")
         return {"kind": "git", "commit": commit, "path": prefix + name}
@@ -115,6 +119,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     help="derive held-out worlds from a future round of this randomness beacon (drand needs the network)")
     ap.add_argument("--anchor-git", action="store_true",
                     help="after each pre-registration entry, git add, commit and push the notebook before going on")
+    ap.add_argument("--anchor-trailer", action="append", default=[], metavar="LINE",
+                    help="a line to end each anchor commit message with; may be given more than once")
     ap.add_argument("--workers", type=int, default=os.cpu_count() or 1)
     ap.add_argument("--verify-sample", type=int, default=6)
     args = ap.parse_args(argv)
@@ -127,7 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"refusing to overwrite an existing notebook at {nb_path}", file=sys.stderr)
         return 2
     beacon = DrandBeacon() if args.beacon == "drand" else None
-    anchor = git_anchor(args.out) if args.anchor_git else None
+    anchor = git_anchor(args.out, trailers=args.anchor_trailer) if args.anchor_git else None
     try:  # learn now, not after the search, that the beacon or the repository is out of reach
         if beacon is not None:
             beacon.commit()

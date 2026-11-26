@@ -38,8 +38,12 @@ class AsymmetricLoss:
     power: float = 2.0
 
     def __post_init__(self):
-        if self.over < 0 or self.under < 0 or self.power < 1:
-            raise ValueError("loss coefficients must be non-negative and power >= 1")
+        for name in ("over", "under", "power"):
+            v = getattr(self, name)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                raise ValueError(f"loss setting {name} must be a finite number")
+        if self.over < 0 or self.under < 0 or not 1 <= self.power <= 8 or max(self.over, self.under) > 1e6:
+            raise ValueError("loss coefficients must lie between 0 and 1e6 and the power between 1 and 8")
 
     def __call__(self, claim: float, truth: float) -> float:
         d = claim - truth
@@ -50,7 +54,13 @@ class AsymmetricLoss:
 
     @staticmethod
     def from_dict(d: Mapping) -> "AsymmetricLoss":
-        return AsymmetricLoss(float(d["over"]), float(d["under"]), float(d.get("power", 2.0)))
+        """Read a loss written by someone else.  Raises ``ValueError`` unless every setting is a real, finite number."""
+        if not isinstance(d, Mapping):
+            raise ValueError("a loss is described by a mapping")
+        try:
+            return AsymmetricLoss(d["over"], d["under"], d.get("power", 2.0))
+        except (KeyError, TypeError, OverflowError) as exc:
+            raise ValueError(f"unusable loss: {exc}") from exc
 
     def expected(self, claim: float, mean: float, sd: float) -> float:
         """Expected loss of ``claim`` when the truth is N(mean, sd), clipped to [0, 1]."""

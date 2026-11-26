@@ -106,3 +106,8 @@ def clamp(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
 def mean(xs: Iterable[float]) -> float:
     xs = list(xs)
     return sum(xs) / len(xs) if xs else 0.0
+
+
+class ConfigurationError(RuntimeError):
+    """Something is set up wrongly (no credentials, unknown model): retrying cannot help, so nothing should hide it."""
+

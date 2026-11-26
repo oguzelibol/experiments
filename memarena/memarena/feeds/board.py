@@ -97,7 +97,7 @@ def blob_address(obj: Any) -> str:
 
 
 class Board:
-    def __init__(self, path: str | None = None, max_body_bytes: int = 64_000):
+    def __init__(self, path: str | None = None, max_body_bytes: int = 64_000, max_blob_bytes: int = 8_000_000):
         self._posts: list[Post] = []
         self._by_author: dict[str, list[int]] = {}
         self._inbox: dict[str, list[int]] = {}
@@ -105,16 +105,30 @@ class Board:
         self._lock = threading.RLock()
         self._path = path
         self.max_body_bytes = max_body_bytes
+        self.max_blob_bytes = max_blob_bytes
         if path and os.path.exists(path):
             self._load(path)
 
     # ------------------------------------------------------------- writing
     def post(self, author: str, kind: str, body: Mapping, to: str | None = None, round: int = 0) -> Post:
-        if not author or not kind:
-            raise ValueError("author and kind are required")
+        # Everything is checked before anything is changed: a post is either on the chain, in the
+        # indexes and in the store, or nowhere.
+        for name, value in (("author", author), ("kind", kind)):
+            if not isinstance(value, str) or not 0 < len(value) <= 256:
+                raise ValueError(f"{name} must be a short, non-empty string")
+        if to is not None and (not isinstance(to, str) or not 0 < len(to) <= 256):
+            raise ValueError("the recipient must be a short string or nobody")
+        if isinstance(round, bool) or not isinstance(round, int) or not 0 <= round < 2 ** 31:
+            raise ValueError("the round must be a whole number")
+        if not isinstance(body, Mapping):
+            raise ValueError("a post body is a mapping")
         encoded = canonical_json(body)
         if len(encoded) > self.max_body_bytes:
             raise ValueError("post body too large; put bulky payloads in a blob and reference its hash")
+        try:
+            (author + kind + (to or "") + encoded).encode("utf-8")
+        except UnicodeError:
+            raise ValueError("a post must be text that can be stored (no lone surrogates)") from None
         body = json.loads(encoded)  # detach from caller, normalise floats
         cited = body.get("blobs", []) if isinstance(body, dict) else []
         if not isinstance(cited, list) or not all(isinstance(h, str) for h in cited):
@@ -130,25 +144,30 @@ class Board:
             prev = self._posts[-1].hash if self._posts else GENESIS
             post = Post(seq, author, author_seq, kind, body, to, int(round), prev,
                         _post_hash(seq, author, author_seq, kind, body, to, int(round), prev))
+            if self._path:  # the store first: if it cannot be written, nothing else has changed
+                with open(self._path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"post": post.to_dict()}) + "\n")
             self._posts.append(post)
             self._by_author.setdefault(author, []).append(seq - 1)
             if to:
                 self._inbox.setdefault(to, []).append(seq - 1)
-            if self._path:
-                with open(self._path, "a", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"post": post.to_dict()}, ensure_ascii=False) + "\n")
             return post
 
     def put_blob(self, obj: Any) -> str:
         """Store a JSON-serialisable payload; returns its content hash (see ``blob_address``)."""
         encoded = canonical_json(obj)
-        h = sha256_hex(encoded)
+        if len(encoded) > self.max_blob_bytes:
+            raise ValueError("payload too large to store")
+        try:
+            h = sha256_hex(encoded)
+        except UnicodeError:
+            raise ValueError("a payload must be text that can be stored (no lone surrogates)") from None
         with self._lock:
             if h not in self._blobs:
-                self._blobs[h] = encoded
                 if self._path:
                     with open(self._path, "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"blob": h, "data": json.loads(encoded)}, ensure_ascii=False) + "\n")
+                        fh.write(json.dumps({"blob": h, "data": json.loads(encoded)}) + "\n")
+                self._blobs[h] = encoded
         return h
 
     # ------------------------------------------------------------- reading

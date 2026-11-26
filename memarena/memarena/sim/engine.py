@@ -315,7 +315,7 @@ class Simulation:
         members = sorted(members if members is not None else self.units)
         # Every result is re-verified here; nothing unverified reaches the society's accounts.
         rules = self.scenario.rules
-        audit = audit_record(self.board, self.family, self._verified, (rules.exam_streams, rules.exam_questions))
+        audit = audit_record(self.board, self.family, self._verified)
         signals, cheats = audit.signals, audit.cheats
         rep = reputation(signals, sorted(self.units), banned=cheats, seeds=members)
         # An examiner that walks away from exams once it knows the paper publishes a selected sample.

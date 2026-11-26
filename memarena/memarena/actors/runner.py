@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
+from ..util import ConfigurationError
 from .unit import Unit
 
 __all__ = ["UnitRunner"]
@@ -52,16 +53,45 @@ class UnitRunner:
         if self._open_round is not None:
             self.pump()
 
-    def run(self, should_stop: Callable[[], bool] | None = None, max_seconds: float | None = None) -> None:
+    def run(self, should_stop: Callable[[], bool] | None = None, max_seconds: float | None = None,
+            max_outage_seconds: float = 120.0) -> str:
+        """Follow the clock until told to stop.  Returns why it stopped.
+
+        A board that cannot be reached is retried with a growing pause.  The
+        unit acts from what the chain says, so a step that was cut short is
+        simply taken again.  After ``max_outage_seconds`` without the board the
+        run ends cleanly instead of dying.
+        """
         start = time.time()
+        down_since: float | None = None
+        pause = self.poll_seconds
+        why = "stopped"
         while True:
-            self.tick()
+            try:
+                self.tick()
+                down_since, pause = None, self.poll_seconds
+            except ConfigurationError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - the board is somebody else's machine
+                now = time.time()
+                down_since = down_since if down_since is not None else now
+                self.unit.log.append({"round": self.unit.round, "event": "board_unreachable", "why": f"{type(exc).__name__}: {str(exc)[:160]}"})
+                if now - down_since > max_outage_seconds:
+                    return "the board could not be reached"
+                pause = min(30.0, pause * 2)
             if should_stop is not None and should_stop():
                 break
             if max_seconds is not None and time.time() - start > max_seconds:
+                why = "time limit"
                 break
-            time.sleep(self.poll_seconds)
+            time.sleep(pause)
         if self._open_round is not None:
-            self.pump()
-            self.unit.end_round()
+            try:
+                self.pump()
+                self.unit.end_round()
+            except ConfigurationError:
+                raise
+            except Exception:  # noqa: BLE001
+                why = "the board could not be reached"
             self._open_round = None
+        return why

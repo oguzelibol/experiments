@@ -24,7 +24,7 @@ import math
 from dataclasses import replace
 from typing import Sequence
 
-from ..actors.protocol import derive_exam_share, exam_posts, joint_exam_seed, pack_probes, share_commitment
+from ..actors.protocol import derive_exam_share, joint_exam_seed, pack_probes, read_exam, share_commitment
 from ..actors.unit import Unit
 from ..benchmark.schema import Answer, Probe
 from ..benchmark.synthetic import generate
@@ -80,11 +80,10 @@ class Colluder(Unit):
         super().__init__(*args, **kwargs)
         self._ring = shared if shared is not None else {}
 
-    def _on_nonce(self, post) -> None:
-        super()._on_nonce(post)
-        st = self._set.get((post.author, post.body.get("xid")))
-        if st is not None and post.author in self.spec.allies and "exam" in st:
-            self._ring[post.body["xid"]] = st["exam"].keys()
+    def _make_offer(self, st: dict, reading) -> None:
+        super()._make_offer(st, reading)
+        if st["examinee"] in self.spec.allies and "exam" in st:
+            self._ring[st["xid"]] = st["exam"].keys()
 
     def _answer_exam(self, probes: Sequence[Probe], examiner: str, xid: str) -> dict[str, Answer]:
         keys = self._ring.get(xid) if examiner in self.spec.allies else None
@@ -102,8 +101,8 @@ class _OwnBooks(Unit):
     def _publish_result(self, st: dict) -> None:
         if st["examinee"] in self.spec.allies:
             return super()._publish_result(st)
-        _posts, theirs, _ours = exam_posts(self.board, self.id, st["examinee"], st["xid"])
-        opened = next((p for p in theirs if p.kind == "exam.open"), None)
+        reading = read_exam(self.board, self.id, st["examinee"], st["xid"])
+        opened = reading.opened
         answers: dict[str, Answer] = {}
         guess, valid = 1.0, False
         if opened is not None:
@@ -136,12 +135,11 @@ class Rigger(_OwnBooks):
 class Switcher(_OwnBooks):
     """Publishes one standard and applies a harsher one to rivals."""
 
-    def _on_request(self, post) -> None:
-        super()._on_request(post)
-        st = self._set.get((post.author, post.body.get("xid")))
-        if st is not None and post.author not in self.spec.allies:
+    def _make_offer(self, st: dict, reading) -> None:
+        if st["examinee"] not in self.spec.allies:
             std = self.eval.standard
             st["module"] = self.eval.with_standard(Standard({"em|detect|micro": 1.0}, std.capability_weights, std.exam))
+        super()._make_offer(st, reading)
 
 
 class Fabricator(Unit):
@@ -157,20 +155,21 @@ class Fabricator(Unit):
             return
         victim = self.id if self.TARGET_SELF else rivals[round_ % len(rivals)]
         xid = f"{victim}>{self.id}#forged{round_}"
-        share = derive_exam_share(self.spec.seed, self.id, 10_000 + round_)
+        share = derive_exam_share(self.spec.seed, self.id, victim, xid)
         nonce = f"invented-nonce-{round_}"
         exam = generate(joint_exam_seed(share, nonce, xid),
                         self.eval.standard.gen_config(self.rules.exam_streams, self.rules.exam_questions))
         salt = f"forged-salt-{round_}"
-        # Its own half of a transcript is all it can write: the victim's posts cannot be forged.
-        self._post("exam.ready", {"xid": xid, "share_commit": share_commitment(share)}, to=victim)
+        # Its own half of an exam is all it can write: the victim's posts cannot be forged.
+        self._post("exam.ready", {
+            "xid": xid, "share_commit": share_commitment(share, victim, xid),
+            "exam_size": [self.rules.exam_streams, self.rules.exam_questions], "loss": self.rules.peer_loss.to_dict(),
+        }, to=victim)
         probes_blob = self.board.put_blob(pack_probes(exam.probes()))
         self._post("exam.offer", {
             "xid": xid, "probes": probes_blob, "blobs": [probes_blob], "n": len(exam),
             "keys_commit": keys_commitment(exam.instances, salt),
             "standard": self.eval.standard.to_dict(), "evaluator": self.eval.fingerprint(),
-            "loss": self.rules.peer_loss.to_dict(),
-            "exam_size": [self.rules.exam_streams, self.rules.exam_questions],
         }, to=victim)
         self._post("exam.keys", {"xid": xid, "share": share, "salt": salt}, to=victim)
         if self.TARGET_SELF:  # its own keys, answered perfectly
@@ -214,34 +213,32 @@ class Aborter(Unit):
 
     WALK_ABOVE = 0.45
 
-    def _on_nonce(self, post) -> None:
-        st = self._set.get((post.author, post.body.get("xid")))
-        design = self.view(post.author).design
-        nonce = post.body.get("nonce")
-        if st is not None and "offer_seq" not in st and post.author not in self.spec.allies and design and isinstance(nonce, str):
+    def _make_offer(self, st: dict, reading) -> None:
+        design = self.view(st["examinee"]).design
+        if st["examinee"] not in self.spec.allies and design:
             try:
                 rival = HeuristicMemory(MemoryConfig.from_dict(design))
-                exam = self._draw_exam(post.author, joint_exam_seed(st["share"], nonce, post.body["xid"]), st["module"])
+                exam = self._draw_exam(st["examinee"], joint_exam_seed(st["share"], reading.nonce.body["nonce"], st["xid"]), st["module"])
                 score = st["module"].evaluate(run_system(rival, exam.probes()), exam.instances, "peek").score
             except (KeyError, ValueError, TypeError):
                 score = 0.0
             if score > self.WALK_ABOVE:
                 st["done"] = True  # the rival would do well on this paper: no offer, no explanation
                 return
-        super()._on_nonce(post)
+        super()._make_offer(st, reading)
 
 
 class NoShow(Unit):
     """Asks for exams, looks at the questions, and then never commits to answers."""
 
-    def _on_offer(self, post) -> None:
+    def _seal_answers(self, st: dict, reading) -> None:
         return
 
 
 class Silent(Unit):
     """Seals its answers, waits for the keys, and then never opens them."""
 
-    def _on_keys(self, post) -> None:
+    def _open_answers(self, st: dict, reading) -> None:
         return
 
 

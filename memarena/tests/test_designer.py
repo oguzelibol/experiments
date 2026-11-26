@@ -721,7 +721,7 @@ def test_the_societys_accounts_do_not_read_private_unit_state():
         copy.post(post.author, post.kind, post.body, to=post.to, round=post.round)
     assert copy.head() == sim.board.head()
     units = sorted(sim.units)
-    audit = audit_record(copy, sim.family, exam_size=(scenario.rules.exam_streams, scenario.rules.exam_questions))
+    audit = audit_record(copy, sim.family)
     rep = reputation(audit.signals, units, banned=audit.cheats, seeds=units)
     champions = select_champions(audit.signals, rep, units, published_since(copy, units),
                                  max_items=scenario.rules.exam_streams * scenario.rules.exam_questions)

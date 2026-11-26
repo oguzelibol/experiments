@@ -42,10 +42,20 @@ def main() -> int:
 
     brain = None
     if args.brain == "llm":
-        from memarena.actors.brain import LLMBrain
-        from memarena.llm.client import AnthropicClient
+        from memarena.actors.brain import BackgroundBrain, LLMBrain
+        from memarena.llm.client import AnthropicClient, LLMConfigError
 
-        brain = LLMBrain(AnthropicClient(model=args.model))  # credentials come from the environment
+        client = AnthropicClient(model=args.model, timeout=120.0, max_retries=1)  # credentials come from the environment
+        try:  # find out now, not after an hour of running on the policy, that the model cannot be reached
+            first = client.complete(system=None, prompt="Reply with the single word: ready", max_tokens=64, effort="low", purpose="preflight")
+        except LLMConfigError as exc:
+            print(f"cannot use the model: {exc}", file=sys.stderr)
+            return 2
+        if first.status != "ok":
+            print(f"warning: the first model call did not succeed ({first.status}: {first.text[:120]}); the unit will fall back "
+                  "on its policy whenever the brain fails", file=sys.stderr)
+        # the model is called off the unit's thread: a slow reply must not make the unit miss its exams
+        brain = BackgroundBrain(LLMBrain(client))
     spec = UnitSpec(
         unit_id=args.unit, owner=args.owner, policy=UnitPolicy(),
         memory=MemoryConfig(features=frozenset(f for f in args.features.split(",") if f)),
@@ -53,8 +63,10 @@ def main() -> int:
     )
     unit = Unit(spec, BoardClient(args.board, args.token), WorldRules(), brain=brain)
     print(f"{args.unit} following the clock on {args.board} (brain: {args.brain})", flush=True)
-    UnitRunner(unit).run(max_seconds=args.max_seconds)
-    print(f"{args.unit} stopped: {unit.stats}")
+    why = UnitRunner(unit).run(max_seconds=args.max_seconds)
+    print(f"{args.unit} stopped ({why}): {unit.stats}")
+    if brain is not None:
+        print(f"brain: {brain.calls} calls started, {brain.plans} plans used, {brain.failures} failed")
     return 0
 
 
