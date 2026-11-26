@@ -1083,3 +1083,53 @@ def test_spearman():
     assert spearman([1, 2, 3, 4], [10, 20, 30, 40]) == pytest.approx(1.0)
     assert spearman([1, 2, 3, 4], [4, 3, 2, 1]) == pytest.approx(-1.0)
     assert spearman([1, 1, 1], [1, 2, 3]) is None and spearman([1, 2], [1, 2]) is None
+
+
+def test_remembering_repeated_work_changes_nothing_about_a_society():
+    # One exam is regenerated and regraded by its examiner, its examinee, the readers of its result and the
+    # audit.  The protocol remembers both computations under a key of everything they read.  A society run
+    # with the tables off, on, and on again with the tables already full must write the same chain.
+    from memarena.actors import protocol
+
+    def run(kind=None):
+        if kind is None:
+            scenario, specs = small_world(seed=4, rounds=3)
+            sim = Simulation(scenario, specs)
+            result = sim.run()
+        else:
+            sim, result = run_with(kind, seed=4, rounds=3)
+        return result.board_head, result.value, sorted(audit_record(sim.board, FAMILY).cheats)
+
+    protocol.use_memo(False)
+    try:
+        plain = [run(), run("deflator"), run("rigger")]
+    finally:
+        protocol.use_memo(True)
+    cold = [run(), run("deflator"), run("rigger")]
+    warm = [run(), run("deflator"), run("rigger")]
+    assert plain == cold == warm
+    assert plain[1][2] and plain[2][2]  # the two units that published something false are still caught
+
+
+def test_the_remembered_grade_depends_on_every_answer_and_on_the_standard():
+    from memarena.actors import protocol
+
+    standard = Standard({"judge_lenient|detect|micro": 1.0})
+    cfg = standard.gen_config(2, 6)
+    paper = protocol._paper("memo-seed", cfg)
+    assert protocol._paper("memo-seed", cfg) is paper and protocol.draw_paper("memo-seed", cfg) is paper.exam
+    assert protocol._paper("memo-seed-2", cfg) is not paper
+    assert protocol._paper("memo-seed", dataclasses.replace(cfg, questions_per_stream=5)) is not paper
+    module = EvaluationModule(standard, FAMILY)
+    right = {i.probe_id: Answer(i.key.answer) for i in paper.exam.instances}
+    wrong = dict(right)
+    first = paper.exam.instances[0].probe_id
+    wrong[first] = Answer("something else entirely")
+    a, b = protocol._grade(module, paper, right, "salt"), protocol._grade(module, paper, wrong, "salt")
+    assert a.score > b.score and a.receipt["subject"] != b.receipt["subject"]
+    assert protocol._grade(module, paper, right, "salt") is a  # the same sheet is not graded twice
+    assert protocol._grade(module, paper, right, "other-salt").receipt["keys_commit"] != a.receipt["keys_commit"]
+    other = EvaluationModule(Standard({"em|detect|micro": 1.0}), FAMILY)
+    assert protocol._grade(other, paper, right, "salt").receipt["evaluator"] != a.receipt["evaluator"]
+    # answers to questions that are not on the paper are not read, so they do not make a different sheet
+    assert protocol._grade(module, paper, dict(right, stray=Answer("x")), "salt") is a

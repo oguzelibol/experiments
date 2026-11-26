@@ -57,22 +57,25 @@ afterwards are the settled ones it returns, never the ones in the post.
 from __future__ import annotations
 
 import math
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..benchmark.schema import Answer, AnswerKey, Instance, Probe, Session, Turn
 from ..benchmark.synthetic import generate
 from ..evalcore.calibration import AsymmetricLoss
 from ..evalcore.criteria import CriteriaFamily
+from ..evalcore.grader import answers_hash
 from ..evalcore.module import EvaluationModule, compare_receipt, keys_commitment
 from ..evalcore.standard import Standard
-from ..util import canonical_json, sha256_hex, verify_commit
+from ..util import canonical_json, hash_obj, sha256_hex, verify_commit
 
 __all__ = [
     "pack_probes", "unpack_probes", "instances_from", "derive_exam_share", "share_commitment",
     "joint_exam_seed", "Verdict", "Reading", "ExamIndex", "read_exam", "check_paper", "settle", "called_off",
-    "check_result", "verify_result", "round_at", "CLOCK_AUTHOR", "MAX_EXAM_STREAMS", "MAX_EXAM_STREAM_QUESTIONS",
-    "MAX_ID_CHARS", "GRACE_CLOCKS",
+    "check_result", "verify_result", "round_at", "draw_paper", "CLOCK_AUTHOR", "MAX_EXAM_STREAMS",
+    "MAX_EXAM_STREAM_QUESTIONS", "MAX_ID_CHARS", "GRACE_CLOCKS",
 ]
 
 CLOCK_AUTHOR = "env"
@@ -448,13 +451,95 @@ def _read_exam(board, examiner, examinee, xid, index, clock_author) -> Reading:
                    reason="the examinee sealed answers, saw the keys and opened nothing in time")
 
 
+# --------------------------------------------------------------------------- work done once
+#
+# Drawing a paper from a seed and grading a sheet against it are pure functions
+# of public data, and one exam is checked by its examiner, its examinee, every
+# reader of its result and every auditor.  In one process that is the same
+# computation several times over.  The two tables below remember results under
+# a key made of *everything* the computation reads, so a reader that is shown
+# different data gets a different computation.  They change how often the work
+# is done and never what a reader concludes; a test runs a society with and
+# without them and compares the chains.
+
+MEMO_ENTRIES = 512
+_MEMO_LOCK = threading.Lock()
+_PAPERS: "OrderedDict[tuple, _Paper]" = OrderedDict()
+_GRADES: "OrderedDict[tuple, Any]" = OrderedDict()
+_memo_on = True
+
+
+def _memo(table: "OrderedDict[tuple, Any]", key: tuple, compute: Callable[[], Any]) -> Any:
+    if not _memo_on:
+        return compute()
+    with _MEMO_LOCK:
+        if key in table:
+            table.move_to_end(key)
+            return table[key]
+    value = compute()  # an exception is never remembered
+    with _MEMO_LOCK:
+        table[key] = value
+        while len(table) > MEMO_ENTRIES:
+            table.popitem(last=False)
+    return value
+
+
+def use_memo(on: bool) -> None:
+    """Switch the tables on or off (and empty them).  For tests that compare the two."""
+    global _memo_on
+    with _MEMO_LOCK:
+        _memo_on = bool(on)
+        _PAPERS.clear()
+        _GRADES.clear()
+
+
+class _Paper:
+    """A drawn exam with the hashes readers compare it by."""
+
+    def __init__(self, key: tuple, exam: Any):
+        self.key = key
+        self.exam = exam
+        self.probes_address = sha256_hex(canonical_json(pack_probes(exam.probes())))
+        self._commitments: dict[str, str] = {}
+
+    def keys_commitment(self, salt: str) -> str:
+        if salt not in self._commitments:
+            if len(self._commitments) > 16:
+                self._commitments.clear()
+            self._commitments[salt] = keys_commitment(self.exam.instances, salt)
+        return self._commitments[salt]
+
+
+def _paper(seed: str, cfg: Any) -> _Paper:
+    """The exam ``seed`` gives under generator settings ``cfg``.  Raises ``ValueError`` if there is none."""
+    key = (str(seed), hash_obj(cfg.to_dict()))
+    return _memo(_PAPERS, key, lambda: _Paper(key, generate(seed, cfg)))
+
+
+def draw_paper(seed: str, cfg: Any):
+    """The exam ``seed`` gives under ``cfg``: the same object ``settle`` regenerates.  Treat it as read-only."""
+    return _paper(seed, cfg).exam
+
+
+def _grade(module: EvaluationModule, paper: _Paper, answers: Mapping[str, Answer], salt: str):
+    """``module.evaluate`` of ``answers`` on a drawn paper.
+
+    The key holds the evaluator's fingerprint (grading code, judges, criteria
+    family, standard), the paper's seed and settings, the key salt and a hash
+    of every answer that will be read.
+    """
+    ids = {i.probe_id for i in paper.exam.instances}
+    key = (module.fingerprint(), paper.key, str(salt), answers_hash({p: a for p, a in answers.items() if p in ids}))
+    return _memo(_GRADES, key, lambda: module.evaluate(answers, paper.exam.instances, salt))
+
+
 # --------------------------------------------------------------------------- the paper
 
 def check_paper(board: Any, reading: Reading, index: ExamIndex | None = None):
     """Is the paper what the joint seed gives under the examiner's published standard?
 
-    Needs the keys to be public.  Returns (ok, reason, standard, salt,
-    regenerated exam).  Every reason for failure here lies with the examiner.
+    Needs the keys to be public.  Returns (ok, reason, standard, salt, the
+    regenerated paper).  Every reason for failure here lies with the examiner.
     Never raises.
     """
     try:
@@ -488,17 +573,17 @@ def _check_paper(board, reading, index):
         return False, "the exam used a standard other than the examiner's published one", None, None, None
     streams, questions, _loss = reading.terms
     try:
-        regenerated = generate(joint_exam_seed(share, nonce, reading.xid), standard.gen_config(streams, questions))
+        paper = _paper(joint_exam_seed(share, nonce, reading.xid), standard.gen_config(streams, questions))
     except ValueError as exc:
         return False, f"no exam can be drawn from the joint seed under the stated standard: {exc}", None, None, None
     probes_blob = offer.body.get("probes")
     if not isinstance(probes_blob, str) or probes_blob not in (offer.body.get("blobs") or ()):
         return False, "the offer does not vouch for its questions being on the board", None, None, None
-    if sha256_hex(canonical_json(pack_probes(regenerated.probes()))) != probes_blob:
+    if paper.probes_address != probes_blob:
         return False, "the questions were not generated from the joint seed under the stated standard", None, None, None
-    if keys_commitment(regenerated.instances, salt) != offer.body.get("keys_commit"):
+    if paper.keys_commitment(salt) != offer.body.get("keys_commit"):
         return False, "the answer keys are not the ones generated from the joint seed and committed to in the offer", None, None, None
-    return True, "ok", standard, salt, regenerated
+    return True, "ok", standard, salt, paper
 
 
 def called_off(board: Any, examiner: str, examinee: str, xid: str, index: ExamIndex | None = None) -> bool:
@@ -581,7 +666,7 @@ def _settle(board, family, examiner, examinee, xid, index, clock_author) -> Verd
                   final_seq=reading.final_seq)
     if not reading.settled:
         return _fail(reading.reason, pending=not reading.over and reading.stage not in ("none",), fault=reading.fault, **common)
-    ok, why, standard, salt, regenerated = check_paper(board, reading, index)
+    ok, why, standard, salt, paper = check_paper(board, reading, index)
     if not ok:
         return _fail(why, fault="examiner", **dict(common, stage="spoiled"))
 
@@ -596,7 +681,7 @@ def _settle(board, family, examiner, examinee, xid, index, clock_author) -> Verd
             answers = {str(pid): Answer.from_dict(a) for pid, a in blob.items()}
         except Exception:  # noqa: BLE001 - it opened something that is not an answer sheet: every answer is missing
             answers = {}
-    evaluation = EvaluationModule(standard, family).evaluate(answers, regenerated.instances, salt)
+    evaluation = _grade(EvaluationModule(standard, family), paper, answers, salt)
     score = float(evaluation.score)
 
     # ---- the self-estimate and the calibration loss

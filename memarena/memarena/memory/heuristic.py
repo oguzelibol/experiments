@@ -23,6 +23,7 @@ feature budget has to specialise:
 
 from __future__ import annotations
 
+from functools import lru_cache
 import datetime as _dt
 import hashlib
 import math
@@ -121,6 +122,7 @@ _IRREGULAR = {
 }
 
 
+@lru_cache(maxsize=200_000)
 def stem(word: str) -> str:
     w = word.lower().replace("’", "'")
     if w.endswith("'s"):

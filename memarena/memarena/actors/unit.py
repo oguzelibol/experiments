@@ -41,8 +41,8 @@ from ..memory.heuristic import FEATURES, STYLES, HeuristicMemory, MemoryConfig
 from ..feeds.board import blob_address
 from ..util import ConfigurationError, commit, make_rng, sha256_hex
 from .protocol import (
-    check_paper, check_result, derive_exam_share, joint_exam_seed, pack_probes, read_exam, settle, share_commitment,
-    unpack_probes,
+    check_paper, check_result, derive_exam_share, draw_paper, joint_exam_seed, pack_probes, read_exam, settle,
+    share_commitment, unpack_probes,
 )
 
 __all__ = ["WorldRules", "UnitPolicy", "UnitSpec", "Unit", "PeerView", "pack_probes", "unpack_probes", "mutate_config"]
@@ -460,7 +460,7 @@ class Unit:
 
     def _draw_exam(self, examinee: str, exam_seed: str, module: EvaluationModule):
         """The exam for one examinee: drawn from my published standard, whoever is asking."""
-        return generate(exam_seed, module.standard.gen_config(self.rules.exam_streams, self.rules.exam_questions))
+        return draw_paper(exam_seed, module.standard.gen_config(self.rules.exam_streams, self.rules.exam_questions))
 
     def _answer_exam(self, probes: Sequence[Probe], examiner: str, xid: str) -> dict[str, Answer]:
         return run_system(self.memory, probes)
