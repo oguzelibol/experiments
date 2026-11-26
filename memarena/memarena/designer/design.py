@@ -20,9 +20,12 @@ from ..actors.unit import UnitPolicy, UnitSpec, WorldRules
 from ..evalcore.criteria import CriteriaFamily
 from ..memory.heuristic import FEATURES, MemoryConfig
 from ..sim.engine import ExternalConfig, Scenario, unit_secret
-from ..util import hash_obj, make_rng
+from ..util import hash_obj, make_rng, sha256_hex
 
-__all__ = ["Design", "sample_scenario", "mutate_design", "crossover", "SPECIALIST_TEMPLATES", "CRITERION_PLANS"]
+__all__ = [
+    "Design", "sample_scenario", "mutate_design", "crossover", "build_seed", "clamp_design", "SPECIALIST_TEMPLATES",
+    "CRITERION_PLANS",
+]
 
 # Starting designs that between them cover every ability (used by init="covering").
 SPECIALIST_TEMPLATES: tuple[dict, ...] = (
@@ -77,6 +80,9 @@ class Design:
         specs: list[UnitSpec] = []
         for k in range(self.n_units):
             rng = make_rng("build", seed, k)
+            # Scoring beliefs come from their own stream, so that changing how memory designs are
+            # assigned leaves every unit's belief as it was (and the two can be compared cleanly).
+            belief = make_rng("build-belief", seed, k)
             if self.init == "covering":
                 t = SPECIALIST_TEMPLATES[k % len(SPECIALIST_TEMPLATES)]
                 feats = frozenset(t["features"][: rules.feature_budget])
@@ -91,12 +97,12 @@ class Design:
             elif self.criterion_plan == "prior_mixture":
                 weights = dict(family.prior)
             elif self.criterion_plan == "panel":
-                picks = rng.choices(ids, weights=prior, k=3)
+                picks = belief.choices(ids, weights=prior, k=3)
                 weights = {}
                 for c in picks:
                     weights[c] = weights.get(c, 0.0) + 1.0
             else:  # "prior": one criterion per unit, drawn from the prior
-                weights = {rng.choices(ids, weights=prior, k=1)[0]: 1.0}
+                weights = {belief.choices(ids, weights=prior, k=1)[0]: 1.0}
             specs.append(
                 UnitSpec(
                     unit_id=f"{prefix}{k:02d}", owner=owner, policy=self.policy, memory=memory,
@@ -104,6 +110,45 @@ class Design:
                 )
             )
         return specs
+
+
+def build_seed(world: int | str) -> str:
+    """The seed a design is built from in a given world: one-way in the world's name.
+
+    The hidden outside evaluator is a function of the world's name.  Building
+    units from a hash of it means nothing a design does while it is built, and
+    nothing a unit holds, can be expanded into the outside criterion or its
+    questions.
+    """
+    return sha256_hex(f"build-seed|{world}")[:32]
+
+
+def clamp_design(design: "Design") -> "Design":
+    """A design brought inside the bounds the search itself respects.
+
+    Used on designs that come from outside the search (a proposer), so that an
+    out-of-range value cannot enter the population.
+    """
+    updates = {}
+    for name, spec in _POLICY_MOVES.items():
+        cur = getattr(design.policy, name)
+        if spec[0] == "bool":
+            new = bool(cur)
+        elif spec[0] == "choice":
+            new = cur if cur in spec[1] else spec[1][0]
+        elif spec[0] == "int":
+            new = int(min(spec[2], max(spec[1], int(cur))))
+        else:
+            cur = float(cur)
+            new = round(min(spec[2], max(spec[1], cur if cur == cur else spec[1])), 4)
+        updates[name] = new
+    shade = float(design.shade)
+    return Design(
+        n_units=int(min(12, max(4, int(design.n_units)))), policy=replace(design.policy, **updates),
+        init=design.init if design.init in ("random", "covering") else "random",
+        criterion_plan=design.criterion_plan if design.criterion_plan in CRITERION_PLANS else "prior",
+        shade=min(1.5, max(0.0, shade if shade == shade else 1.0)),
+    )
 
 
 def sample_scenario(seed: int | str, rounds: int = 10, rules: WorldRules | None = None) -> Scenario:

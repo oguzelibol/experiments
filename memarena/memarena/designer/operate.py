@@ -19,7 +19,7 @@ from dataclasses import replace
 from typing import Any, Mapping
 
 from ..actors.unit import UnitSpec, clamp_config, mutate_config
-from ..sim.collective import audit_board, reputation, select_champions
+from ..sim.collective import audit_board, published_since, reputation, select_champions
 from ..sim.engine import Simulation
 from ..util import make_rng
 from .design import Design
@@ -54,15 +54,16 @@ def operate(
         members = sorted(uid for uid, u in sim.units.items() if u.spec.owner == owner)
         signals, cheats, _bad = audit_board(sim.board, sim.family, sim._verified)
         rep = reputation(signals, sorted(sim.units), banned=cheats, seeds=members)
-        since = {uid: u.version_round for uid, u in sim.units.items()}
-        champions = select_champions(signals, rep, members, since)
+        since = published_since(sim.board, sorted(sim.units))
+        champions = select_champions(signals, rep, members, since,
+                                     max_items=sim.scenario.rules.exam_streams * sim.scenario.rules.exam_questions)
         if not champions:
             continue
         rng = make_rng("operate", seed, epoch)
         weakest = min(champions, key=lambda c: (champions[c]["expected"], c))
 
         # retire: a unit nobody would miss
-        protected = {info["unit"] for info in champions.values()}
+        protected = {u for info in champions.values() for u in info["units"]}
         idle = [u for u in members if u not in protected and born.get(u, 0) < sim.round - epoch_rounds + 1]
         if idle and len(members) > min_units:
             victim = min(idle, key=lambda u: (rep.get(u, 0.0), u))

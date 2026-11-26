@@ -1,23 +1,32 @@
 """A lab notebook other designers can check.
 
 Every experiment a designer runs is appended here as one JSON line, linked to
-the previous line by hash.  Failed ideas stay in: there is no way to drop an
-entry without breaking the chain.  ``verify`` re-checks the chain;
-``Designer.verify_notebook`` additionally re-runs sampled experiments and
-confirms the recorded numbers are reproduced exactly.
+the previous line by hash.  Inside one file that makes edits and omissions
+visible: an entry cannot be changed or dropped without re-linking everything
+after it.
+
+The chain does not stop its author from doing exactly that.  Whoever holds the
+file can rewrite it from any point and obtain a different, equally valid chain,
+so the chain alone says nothing about *when* an entry was written.  What fixes
+a notebook in time is a copy published where its author cannot change it (the
+``anchor`` of ``Designer.preregister``); ``extends`` compares a notebook with
+such a copy.  ``Designer.verify_notebook`` checks the claims a notebook makes:
+it recomputes reports from the logged entries and re-runs experiments.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Mapping
+from typing import Mapping
 
 from ..util import canonical_json, sha256_hex
 
 __all__ = ["Notebook", "NOTEBOOK_GENESIS"]
 
 NOTEBOOK_GENESIS = sha256_hex("memarena:notebook:genesis")
+
+_ENTRY_KEYS = {"index", "kind", "body", "prev", "hash"}
 
 
 def _entry_hash(index: int, kind: str, body: Mapping, prev: str) -> str:
@@ -30,9 +39,13 @@ class Notebook:
         self.entries: list[dict] = []
         if path and os.path.exists(path):
             with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    if line.strip():
+                for number, line in enumerate(fh, start=1):
+                    if not line.strip():
+                        continue
+                    try:
                         self.entries.append(json.loads(line))
+                    except (ValueError, RecursionError) as exc:
+                        raise ValueError(f"notebook failed verification: line {number} is not JSON") from exc
             ok, why = self.verify()
             if not ok:
                 raise ValueError(f"notebook failed verification: {why}")
@@ -54,16 +67,45 @@ class Notebook:
         return entry
 
     def verify(self) -> tuple[bool, str]:
+        """Check that every entry is well formed and linked to its predecessor.
+
+        An entry is an object with a string ``kind`` and an object ``body``;
+        readers of a verified notebook rely on that.  Numbers that are not
+        finite cannot be hashed canonically and would compare as neither equal
+        nor different, so an entry holding one is rejected here, as is one
+        nested too deeply to be hashed.
+        """
         prev = NOTEBOOK_GENESIS
         for n, e in enumerate(self.entries, start=1):
-            if e.get("index") != n:
+            if not isinstance(e, dict) or not _ENTRY_KEYS <= e.keys():
+                return False, f"entry {n} is not a notebook entry"
+            if not isinstance(e["kind"], str) or not isinstance(e["body"], dict):
+                return False, f"entry {n} is not a notebook entry"
+            if e["index"] != n:
                 return False, f"entry {n} is out of order"
-            if e.get("prev") != prev:
+            if e["prev"] != prev:
                 return False, f"entry {n} does not link to its predecessor"
-            if e.get("hash") != _entry_hash(n, e["kind"], e["body"], e["prev"]):
+            try:
+                expected = _entry_hash(n, e["kind"], e["body"], e["prev"])
+            except ValueError:
+                return False, f"entry {n} holds a number that is not finite"
+            except RecursionError:
+                return False, f"entry {n} is nested too deeply"
+            if e["hash"] != expected:
                 return False, f"entry {n} was altered"
             prev = e["hash"]
         return True, "ok"
+
+    def extends(self, earlier: "Notebook") -> bool:
+        """True if ``earlier`` is this notebook as it stood at some point.
+
+        That is the question a published copy answers: every entry of the copy
+        must still be here, unchanged and in the same place.  A notebook that
+        was re-linked after the copy was published fails this, however valid
+        its own chain is.
+        """
+        n = len(earlier.entries)
+        return n <= len(self.entries) and earlier.entries == self.entries[:n]
 
     def of_kind(self, kind: str) -> list[dict]:
         return [e for e in self.entries if e["kind"] == kind]

@@ -61,7 +61,7 @@ class AsymmetricLoss:
     def best_report(self, mean: float, sd: float, shade: float = 1.0) -> float:
         """Report minimising expected loss; ``shade`` in [0, 1] interpolates from the mean."""
         mean = min(1.0, max(0.0, mean))
-        if sd <= 0 or shade <= 0 or self.over == self.under:
+        if sd <= 0 or shade <= 0:
             return mean
         lo, hi = 0.0, 1.0
         # expected loss is convex in the claim: ternary search

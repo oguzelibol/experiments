@@ -184,6 +184,7 @@ class Verdict:
     loss: float = 0.0
     void: str = ""  # "" for a sat exam; "sealed" or "open" when the examinee went silent at that step
     receipt: Mapping = field(default_factory=dict)
+    paper: str = ""  # hash of the joint seed: a label for the exam that neither party could choose
     pending: bool = False  # not ok because the exam is still running, not because anything is wrong
 
 
@@ -367,6 +368,7 @@ def _settle(board, family, examiner, examinee, xid, cutoff, clock_author) -> Ver
         n_items=int(evaluation.receipt["n_items"]),
         capability={c: (float(s), int(n)) for c, (s, n) in evaluation.capability.items()},
         guess=guess, guess_valid=guess_valid, loss=float(loss), void=void, receipt=dict(evaluation.receipt),
+        paper=sha256_hex("paper|" + joint_exam_seed(share, nonce, xid)),
     )
 
 

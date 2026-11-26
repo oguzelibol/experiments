@@ -234,7 +234,10 @@ def test_asymmetric_loss_and_best_report():
     assert PEER_LOSS.best_report(0.6, 0.0) == 0.6
     assert PEER_LOSS.best_report(0.6, 0.08, shade=0.0) == 0.6
     sym = AsymmetricLoss(1.0, 1.0)
-    assert sym.best_report(0.6, 0.1) == 0.6
+    assert sym.best_report(0.6, 0.1) == pytest.approx(0.6, abs=1e-3)
+    # near the edge the belief is skewed by clipping, and the minimiser is not the mean even for a symmetric loss
+    edge = sym.best_report(0.95, 0.2)
+    assert edge < 0.92 and sym.expected(edge, 0.95, 0.2) < sym.expected(0.95, 0.95, 0.2)
     # the report really is the minimiser
     best = PEER_LOSS.best_report(0.6, 0.08)
     assert PEER_LOSS.expected(best, 0.6, 0.08) <= min(PEER_LOSS.expected(best + d, 0.6, 0.08) for d in (-0.02, 0.02)) + 1e-9

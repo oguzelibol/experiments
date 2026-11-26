@@ -34,7 +34,8 @@ from ..memory.heuristic import FEATURES, MemoryConfig, observable_class
 from ..util import make_rng, sha256_hex
 from .adversaries import UNIT_KINDS, Colluder
 from .collective import (
-    CLASS_CAPABILITIES, audit_board, audit_record, collective_estimate, gather_signals, reputation, select_champions,
+    CLASS_CAPABILITIES, audit_board, audit_record, champion_for, collective_estimate, gather_signals, published_since,
+    reputation, select_champions,
 )
 
 __all__ = [
@@ -89,7 +90,8 @@ class ExternalEvaluator:
         rows = []
         for it in report.items:
             included, s = it.score(self.criterion)
-            if included and noisy and s in (0.0, 1.0):
+            # noise models a judge misreading an answer; a row that never arrived has nothing to misread
+            if included and noisy and s in (0.0, 1.0) and it.status in ("ok", "truncated"):
                 text = answers[it.probe_id].text if it.probe_id in answers else ""
                 if make_rng("judge-noise", self.seed, it.probe_id, sha256_hex(text)).random() < self.cfg.judge_noise:
                     s = 1.0 - s
@@ -194,7 +196,7 @@ class Simulation:
         brain_factory: Callable[[UnitSpec], Any] | None = None,
         on_round: Callable[["Simulation", int], None] | None = None,
         focus_owner: str | None = None,
-        estimate_shade: float = 1.0,
+        estimate_shade: float | Mapping[str, float] = 1.0,
         board_for: Callable[[str], Any] | None = None,
     ):
         if len({s.unit_id for s in specs}) != len(specs):
@@ -249,7 +251,9 @@ class Simulation:
         key = unit.memory.config_hash()
         hit = self._truth.get(key)
         if hit is None:
-            answers = run_system(unit.memory, self.external.probes())
+            # A fresh system of the same design answers the hidden questions, not the unit's own
+            # object: nothing a unit holds is ever shown them.
+            answers = run_system(unit._factory(unit.memory_cfg), self.external.probes())
             report = self.external.grade(answers)
             hit = {
                 "answers": answers,
@@ -296,8 +300,15 @@ class Simulation:
         return self.result()
 
     # ---------------------------------------------------------------- results
+    def _shade_for(self, owner: str | None) -> float:
+        """How far an owner shades its estimate: its own setting when one was given per owner."""
+        if isinstance(self.estimate_shade, Mapping):
+            return float(self.estimate_shade.get(owner, 1.0))
+        return float(self.estimate_shade)
+
     def _current_since(self) -> dict[str, int]:
-        return {uid: u.version_round for uid, u in self.units.items()}
+        # read from the board, not from the units: the society's accounts use the public record only
+        return published_since(self.board, sorted(self.units))
 
     def collective(self, members: Sequence[str] | None = None, shade: float = 1.0) -> dict:
         """Champions, composite answers, the society's estimate and the outside outcome."""
@@ -309,7 +320,8 @@ class Simulation:
         rep = reputation(signals, sorted(self.units), banned=cheats, seeds=members)
         # An examiner that walks away from exams once it knows the paper publishes a selected sample.
         rep = {u: r * audit.completion.get(u, 1.0) ** 2 for u, r in rep.items()}
-        champions = select_champions(signals, rep, members, self._current_since())
+        exam_items = rules.exam_streams * rules.exam_questions
+        champions = select_champions(signals, rep, members, self._current_since(), max_items=exam_items)
         probes = self.external.probes()
         class_counts: dict[str, int] = {}
         composite: dict[str, Answer] = {}
@@ -317,7 +329,7 @@ class Simulation:
         for p in probes:
             cls = observable_class(p.question)
             class_counts[cls] = class_counts.get(cls, 0) + 1
-            champ = champions.get(cls, {}).get("unit", fallback)
+            champ = champion_for(champions, cls, p.probe_id) or fallback
             if champ is not None:
                 composite[p.probe_id] = self.truth(self.units[champ])["answers"][p.probe_id]
         estimate = collective_estimate(champions, class_counts, loss=self.scenario.external.loss, shade=shade)
@@ -334,9 +346,9 @@ class Simulation:
                 return sum(w * scores.get(c, (0.0, 0))[0] for c, w in caps.items())
 
             best = max(true_class(u) for u in members)
-            regret.append(best - true_class(info["unit"]))
+            regret.append(best - sum(true_class(u) for u in info["units"]) / len(info["units"]))
         return {
-            "champions": {c: i["unit"] for c, i in champions.items()},
+            "champions": {c: list(i["units"]) for c, i in champions.items()},
             "estimate_mean": estimate["mean"], "estimate_sd": estimate["sd"], "estimate_report": estimate["report"],
             "outside_score": outside, "loss": loss,
             "value": outside - self.scenario.external.penalty_weight * loss,
@@ -372,7 +384,7 @@ class Simulation:
             [uid for uid, u in units.items() if u.spec.owner == self.focus_owner]
             if self.focus_owner is not None else None
         )
-        coll = self.collective(focus, shade=self.estimate_shade)
+        coll = self.collective(focus, shade=self._shade_for(self.focus_owner))
         true_scores = {uid: self.truth(u)["score"] for uid, u in units.items()}
         rep = coll["reputation"]
         honest = [uid for uid, u in units.items() if u.spec.kind == "honest"]
@@ -435,7 +447,7 @@ class Simulation:
             members = [uid for uid, u in units.items() if u.spec.owner == owner]
             c = (
                 coll if sorted(members) == sorted(focus if focus is not None else units)
-                else self.collective(members, shade=self.estimate_shade)
+                else self.collective(members, shade=self._shade_for(owner))
             )
             by_owner[owner] = {
                 "units": len(members), "value": c["value"], "outside_score": c["outside_score"],

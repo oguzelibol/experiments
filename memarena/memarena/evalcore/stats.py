@@ -58,6 +58,8 @@ def cluster_mean_se(xs: Sequence[float], clusters: Sequence[str] | None = None) 
     m = sum(xs) / n
     if clusters is None:
         return mean_se(xs)
+    if len(clusters) != n:
+        raise ValueError("one cluster label is needed per value")
     sums: dict[str, float] = {}
     for x, c in zip(xs, clusters):
         sums[c] = sums.get(c, 0.0) + (x - m)
@@ -89,10 +91,19 @@ def bootstrap_ci(
     alpha: float = 0.05,
     seed: int | str = 0,
 ) -> tuple[float, float]:
-    """Percentile bootstrap interval, resampling whole clusters if given."""
+    """Percentile bootstrap interval, resampling whole clusters if given.
+
+    With a single cluster there is nothing to resample, and the interval is
+    reported as unbounded rather than as a point.
+    """
     n = len(xs)
     if n == 0:
         return 0.0, 1.0
+    if clusters is not None:
+        if len(clusters) != n:
+            raise ValueError("one cluster label is needed per value")
+        if len(set(clusters)) < 2:
+            return float("-inf"), float("inf")
     stat = stat or (lambda v: sum(v) / len(v) if v else 0.0)
     rng = random.Random(derive_seed("bootstrap", seed))
     vals = []
@@ -124,6 +135,12 @@ def paired_bootstrap(
     if n == 0:
         return {"diff": 0.0, "ci": (0.0, 0.0), "p_better": 0.5, "n": 0}
     d = [x - y for x, y in zip(a, b)]
+    if clusters is not None:
+        if len(clusters) != n:
+            raise ValueError("one cluster label is needed per pair")
+        if len(set(clusters)) < 2:
+            # one cluster: the data cannot say how much the difference would vary
+            return {"diff": sum(d) / n, "ci": (float("-inf"), float("inf")), "p_better": None, "n": n}
     rng = random.Random(derive_seed("paired", seed))
     diffs = []
     better = 0.0

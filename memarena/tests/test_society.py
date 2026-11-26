@@ -24,7 +24,10 @@ from memarena.feeds.http import BoardClient, BoardServer
 from memarena.llm.client import MockLLM
 from memarena.memory.base import ABSTAIN_TEXT
 from memarena.memory.heuristic import FEATURES, MemoryConfig
-from memarena.sim.collective import Signal, audit_board, audit_record, consensus, gather_signals, reputation
+from memarena.sim.collective import (
+    CLASS_CAPABILITIES, Signal, audit_board, audit_record, collective_estimate, consensus, gather_signals, reputation,
+    select_champions,
+)
 from memarena.sim.engine import ExternalConfig, Scenario, Simulation, random_population, spearman, unit_secret
 from memarena.util import canonical_json, commit, make_rng
 
@@ -639,38 +642,135 @@ def test_a_unit_cannot_post_under_another_name():
     assert [p.author for p in board.read(0)] == ["u00"]
 
 
-def _sig(i, j, s, k=0, n=20):
-    return Signal(f"{i}>{j}#{k}", i, j, s, n, {"multi-session": (s, n)}, 1, 0.0, k)
+def _sig(i, j, s, k=0, n=20, cap="multi-session", paper=""):
+    return Signal(f"{i}>{j}#{k}", i, j, s, n, {cap: (s, n)}, 1, 0.0, k, paper=paper)
 
 
-def test_reputation_respects_the_level_of_grades_and_ignores_rings():
-    # A did badly, B and C did well, each examined by different examiners
+def test_reputation_is_what_trusted_units_measured_first_hand():
+    # the level of grades is kept: who did well stands above who did badly, whoever examined them
     signals = [_sig("x", "A", 0.05), _sig("y", "B", 0.95), _sig("z", "C", 0.95),
                _sig("A", "x", 0.5), _sig("B", "y", 0.5), _sig("C", "z", 0.5)]
     rep = reputation(signals, ["A", "B", "C", "x", "y", "z"])
-    assert rep["B"] > rep["A"] * 2 and rep["C"] > rep["A"] * 2  # every unit keeps a small restart share
+    assert rep["B"] > rep["A"] * 2 and rep["C"] > rep["A"] * 2
     assert sum(rep.values()) == pytest.approx(1.0)
-    # an outsider ring praising itself gains nothing over seeded units
-    ring = [_sig("a", "b", 0.6), _sig("b", "a", 0.6), _sig("a", "p", 0.2), _sig("b", "q", 0.2),
-            _sig("p", "q", 1.0), _sig("q", "p", 1.0), _sig("p", "a", 0.1), _sig("q", "b", 0.1)]
-    seeded = reputation(ring, ["a", "b", "p", "q"], seeds=["a", "b"])
-    assert seeded["a"] > seeded["p"] and seeded["b"] > seeded["q"]
-    assert reputation(ring, ["a", "b", "p", "q"], banned={"p"})["p"] == 0.0
+    # a ring of outsiders praising each other gains exactly nothing
+    base = [_sig("a", "b", 0.6), _sig("b", "a", 0.6), _sig("a", "p", 0.2), _sig("b", "q", 0.2)]
+    praise = [_sig("p", "q", 1.0), _sig("q", "p", 1.0)]
+    quiet = reputation(base, ["a", "b", "p", "q"], seeds=["a", "b"])
+    loud = reputation(base + praise, ["a", "b", "p", "q"], seeds=["a", "b"])
+    assert loud == pytest.approx(quiet) and loud["a"] > loud["p"] * 2
+    # also when the trusted units examine nobody but the ring
+    only_ring = [_sig("a", "p", 0.2), _sig("b", "q", 0.2)]
+    assert reputation(only_ring + praise, ["a", "b", "p", "q"], seeds=["a", "b"]) == pytest.approx(
+        reputation(only_ring, ["a", "b", "p", "q"], seeds=["a", "b"]))
+    # being an examiner's only examinee, or sitting many exams, is no substitute for doing well
+    crowd = [_sig("e1", "W", 0.3)] + [_sig("e2", f"c{k}", 0.5, k) for k in range(9)] + [_sig("e2", "S", 0.9)]
+    rep = reputation(crowd, ["e1", "e2", "W", "S"] + [f"c{k}" for k in range(9)])
+    assert rep["S"] > rep["W"] * 1.5
+    busy = [_sig(f"e{k}", "weak", 0.30, k) for k in range(6)] + [_sig("e0", "strong", 0.95)]
+    rep = reputation(busy, [f"e{k}" for k in range(6)] + ["weak", "strong"])
+    assert rep["strong"] > rep["weak"] * 1.5
+    # a unit that nobody trusted has measured earns nothing by default; a cheat has nothing
+    assert reputation(base, ["a", "b", "p", "q", "stranger"], seeds=["a", "b"])["stranger"] == 0.0
+    assert reputation(base + praise, ["a", "b", "p", "q"], banned={"p"})["p"] == 0.0
     # a unit's opinion of itself counts for nothing
-    base = reputation([_sig("a", "b", 0.5), _sig("b", "a", 0.5)], ["a", "b"])
+    plain = reputation([_sig("a", "b", 0.5), _sig("b", "a", 0.5)], ["a", "b"])
     selfish = reputation([_sig("a", "b", 0.5), _sig("b", "a", 0.5), _sig("a", "a", 1.0)], ["a", "b"])
-    assert selfish == pytest.approx(base)
+    assert selfish == pytest.approx(plain)
     assert reputation([], ["a", "b"]) == {"a": 0.5, "b": 0.5}
 
 
 def test_consensus_removes_examiner_leniency():
     """Unit p is only seen by a harsh examiner, q only by a lenient one; p is truly better."""
-    signals = [_sig("harsh", "p", 0.60, 1, 40), _sig("lenient", "q", 0.70, 2, 40),
-               _sig("harsh", "anchor", 0.40, 3, 40), _sig("lenient", "anchor", 0.80, 4, 40)]
+    def board(n):
+        return [_sig("harsh", "p", 0.60, 1, n), _sig("lenient", "q", 0.70, 2, n),
+                _sig("harsh", "anchor", 0.40, 3, n), _sig("lenient", "anchor", 0.80, 4, n)]
+
     rep = {"harsh": 0.5, "lenient": 0.5}
-    raw = consensus(signals, rep, debias=False)["multi-session"]
-    fair = consensus(signals, rep, debias=True)["multi-session"]
-    assert raw["q"][0] > raw["p"][0] and fair["p"][0] > fair["q"][0]
+    raw = consensus(board(40), rep, debias=False)["multi-session"]
+    fair = consensus(board(40), rep, debias=True)["multi-session"]
+    assert raw["q"][0] > raw["p"][0] and fair["p"][0] > fair["q"][0] + 0.15
+    # with enough evidence the true levels are recovered: p 0.8, q 0.5 on the scale of the average examiner
+    exact = consensus(board(40_000), rep)["multi-session"]
+    assert exact["p"][0] == pytest.approx(0.8, abs=0.002) and exact["q"][0] == pytest.approx(0.5, abs=0.002)
+    assert exact["anchor"][0] == pytest.approx(0.6, abs=0.002)
+
+
+def test_evidence_follows_reputation_and_volume_cannot_stand_in_for_it():
+    trusted, doubtful = {"a": 1.0, "z": 0.01}, [_sig("a", "X", 0.5, 1, 8)]
+    alone = consensus(doubtful, trusted)["multi-session"]["X"]
+    assert alone == pytest.approx((0.5, 8.0))
+    # a barely trusted examiner sets a huge exam in which X does perfectly
+    flooded = consensus(doubtful + [_sig("z", "X", 1.0, 2, 384)], trusted, max_items=24)["multi-session"]["X"]
+    assert flooded[0] < 0.53 and flooded[1] < 12  # the level barely moves and the evidence barely grows
+    same_weight = consensus([_sig("a", "X", 0.5, 1, 8), _sig("b", "X", 0.7, 2, 8)], {"a": 1.0, "b": 1.0})["multi-session"]["X"]
+    assert same_weight == pytest.approx((0.6, 16.0))
+
+
+def test_a_class_that_draws_on_two_abilities_needs_both():
+    """A is strong on one of the two abilities behind 'fact' and weak on the other; B is good at both."""
+    from memarena.sim.collective import _half
+
+    def paper(tag, half):  # a label that falls in the wanted half, so this small example is split evenly
+        return next(f"{tag}-{i}" for i in range(1000) if _half(_sig("e", "u", 0.5, paper=f"{tag}-{i}")) == half)
+
+    signals = []
+    for k in range(4):
+        signals += [
+            Signal(f"A{k}", "e", "A", 0.9, 40, {"single-session-user": (0.9, 40)}, 1, 0.0, k, paper=paper(f"A{k}", k % 2)),
+            Signal(f"a{k}", "e", "A", 0.1, 8, {"knowledge-update": (0.1, 8)}, 1, 0.0, k, paper=paper(f"a{k}", k % 2)),
+            Signal(f"B{k}", "e", "B", 0.65, 24, {"single-session-user": (0.65, 12), "knowledge-update": (0.65, 12)}, 1, 0.0, k,
+                   paper=paper(f"B{k}", k % 2)),
+        ]
+    champions = select_champions(signals, {"e": 0.5, "A": 0.25, "B": 0.25}, ["A", "B"])
+    assert champions["fact"]["units"] == ["B", "B"] and 0.6 < champions["fact"]["expected"] < 0.7
+
+
+def test_the_halves_of_the_evidence_are_not_the_examinees_to_choose():
+    from memarena.sim.collective import _half
+
+    # with a paper label (the joint seed's hash) the exam id has no say
+    assert {_half(_sig("e", "u", 0.5, k, paper="same-paper")) for k in range(50)} == {_half(_sig("e", "u", 0.5, 0, paper="same-paper"))}
+    assert {_half(_sig("e", "u", 0.5, 0, paper=f"paper-{k}")) for k in range(50)} == {0, 1}
+    # and every settled exam carries one
+    scenario, specs = small_world(seed=17, rounds=2, n=4)
+    sim = Simulation(scenario, specs)
+    sim.run()
+    signals, _c, _b = audit_board(sim.board, FAMILY)
+    assert signals and all(len(s.paper) == 64 for s in signals) and len({s.paper for s in signals}) == len(signals)
+
+
+def test_the_collective_estimate_is_not_biased_low():
+    """Known true levels, binomial exam noise: the champions' expected score must centre on what they really score."""
+    caps = list(CAPABILITIES)
+    counts = {"temporal": 32, "aggregate": 32, "fact": 36, "assistant": 13, "preference": 7}
+    rng = random.Random(1)
+    errors = []
+    for world in range(150):
+        units = [f"u{i:02d}" for i in range(8)]
+        p = {}
+        for u in units:
+            strong = set(rng.sample(caps, 3))
+            p[u] = {c: rng.uniform(0.7, 0.9) if c in strong else rng.uniform(0.2, 0.5) for c in caps}
+        focus = {u: sorted(caps, key=lambda c: -p[u][c])[:3] for u in units}
+        signals = []
+        for u in units:
+            for e in range(20):
+                examiner = rng.choice([x for x in units if x != u])
+                table = {c: (sum(rng.random() < p[u][c] for _ in range(8)) / 8, 8) for c in focus[examiner]}
+                signals.append(Signal(f"{u}>{examiner}#{e}", examiner, u, sum(s_ for s_, _ in table.values()) / 3, 24,
+                                      table, 1, 0.0, len(signals), paper=f"{world}-{len(signals)}"))
+        champions = select_champions(signals, reputation(signals, units), units, max_items=24)
+
+        def true(cls):
+            return sum(sum(w * p[u][c] for c, w in CLASS_CAPABILITIES[cls].items()) for u in champions[cls]["units"]) / 2
+
+        outside = sum(n / 120 * (0.94 * true(cls) + 0.06 * sum(p[u]["abstention"] for u in champions[cls]["units"]) / 2)
+                      for cls, n in counts.items())
+        errors.append(collective_estimate(champions, counts)["mean"] - outside)
+    mean = sum(errors) / len(errors)
+    se = (sum((e - mean) ** 2 for e in errors) / (len(errors) - 1)) ** 0.5 / len(errors) ** 0.5
+    assert abs(mean) < 0.02, (mean, se)  # it was -0.08 when champions were pulled towards the average unit
 
 
 def test_mutation_respects_budget_and_clamps_foreign_designs():
