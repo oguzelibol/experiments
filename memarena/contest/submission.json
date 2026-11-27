@@ -1,0 +1,1736 @@
+{
+  "anchor": "git",
+  "arms": {
+    "ablation:attention_random": {
+      "chosen_minus_arm": -0.006167062499999994,
+      "chosen_minus_arm_ci95": [
+        -0.01851965274056977,
+        0.006185527740569782
+      ],
+      "ci95": [
+        0.7715956853354125,
+        0.8329943146645875
+      ],
+      "design_hash": "891045dcac555c3e",
+      "mean": 0.802295,
+      "metrics_mean": {
+        "adoptions": 7.375,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633013,
+        "champion_regret": 0.028987,
+        "esteem_validity": 0.621164,
+        "estimate_error": 0.033346,
+        "estimate_loss": 0.000793,
+        "estimate_report": 0.839608,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006198,
+        "mean_true_first": 0.493387,
+        "mean_true_last": 0.497706,
+        "outside_score": 0.806262,
+        "reputation_validity": 0.635033,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:design_copying_flipped": {
+      "chosen_minus_arm": -0.005031125000000004,
+      "chosen_minus_arm_ci95": [
+        -0.017954618290787802,
+        0.007892368290787795
+      ],
+      "ci95": [
+        0.7686092083882049,
+        0.8337089166117951
+      ],
+      "design_hash": "f1792d3b34df2eca",
+      "mean": 0.8011590625,
+      "metrics_mean": {
+        "adoptions": 7.75,
+        "audit_fails": 0.0,
+        "best_single_true": 0.6305,
+        "champion_regret": 0.015889,
+        "esteem_validity": 0.62593,
+        "estimate_error": 0.030945,
+        "estimate_loss": 0.001491,
+        "estimate_report": 0.839559,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006109,
+        "mean_true_first": 0.492292,
+        "mean_true_last": 0.501478,
+        "outside_score": 0.808615,
+        "reputation_validity": 0.629736,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:estimate_unshaded": {
+      "chosen_minus_arm": 0.0018379374999999906,
+      "chosen_minus_arm_ci95": [
+        -0.005630659669185844,
+        0.009306534669185827
+      ],
+      "ci95": [
+        0.764557826035312,
+        0.8240221739646881
+      ],
+      "design_hash": "fcadf13f8b453520",
+      "mean": 0.79429,
+      "metrics_mean": {
+        "adoptions": 7.625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633013,
+        "champion_regret": 0.022765,
+        "esteem_validity": 0.619034,
+        "estimate_error": 0.014704,
+        "estimate_loss": 0.002181,
+        "estimate_report": 0.8199,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006187,
+        "mean_true_first": 0.493387,
+        "mean_true_last": 0.497712,
+        "outside_score": 0.805196,
+        "reputation_validity": 0.656189,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:exam_floor_flipped": {
+      "chosen_minus_arm": -0.004502937500000005,
+      "chosen_minus_arm_ci95": [
+        -0.018958041822487115,
+        0.009952166822487106
+      ],
+      "ci95": [
+        0.7691648454145875,
+        0.8320969045854124
+      ],
+      "design_hash": "862be9b48e0aaa75",
+      "mean": 0.800630875,
+      "metrics_mean": {
+        "adoptions": 7.8125,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633013,
+        "champion_regret": 0.018892,
+        "esteem_validity": 0.709993,
+        "estimate_error": 0.047989,
+        "estimate_loss": 0.00138,
+        "estimate_report": 0.855521,
+        "exchanges": 233.5,
+        "mean_peer_loss": 0.006193,
+        "mean_true_first": 0.492919,
+        "mean_true_last": 0.49778,
+        "outside_score": 0.807532,
+        "reputation_validity": 0.476725,
+        "results_posted": 233.5,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:initial_designs_flipped": {
+      "chosen_minus_arm": 0.08836124999999999,
+      "chosen_minus_arm_ci95": [
+        0.04309704514236614,
+        0.13362545485763383
+      ],
+      "ci95": [
+        0.6520882132731696,
+        0.7634451617268305
+      ],
+      "design_hash": "2f3943385980e7d8",
+      "mean": 0.7077666875,
+      "metrics_mean": {
+        "adoptions": 11.3125,
+        "audit_fails": 0.0,
+        "best_single_true": 0.615875,
+        "champion_regret": 0.034861,
+        "esteem_validity": 0.677198,
+        "estimate_error": 0.046115,
+        "estimate_loss": 0.003834,
+        "estimate_report": 0.77305,
+        "exchanges": 233.1875,
+        "mean_peer_loss": 0.006043,
+        "mean_true_first": 0.447603,
+        "mean_true_last": 0.478126,
+        "outside_score": 0.726934,
+        "reputation_validity": 0.543357,
+        "results_posted": 233.1875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:niche_off": {
+      "chosen_minus_arm": -0.004759375000000003,
+      "chosen_minus_arm_ci95": [
+        -0.01862942077357435,
+        0.009110670773574345
+      ],
+      "ci95": [
+        0.7675973550940413,
+        0.8341772699059588
+      ],
+      "design_hash": "c8c024d60b313be9",
+      "mean": 0.8008873125,
+      "metrics_mean": {
+        "adoptions": 7.5625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633013,
+        "champion_regret": 0.024444,
+        "esteem_validity": 0.594997,
+        "estimate_error": 0.035207,
+        "estimate_loss": 0.001872,
+        "estimate_report": 0.845457,
+        "exchanges": 233.5,
+        "mean_peer_loss": 0.006167,
+        "mean_true_first": 0.493387,
+        "mean_true_last": 0.497344,
+        "outside_score": 0.81025,
+        "reputation_validity": 0.742093,
+        "results_posted": 233.5,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:peer_scope_flipped": {
+      "chosen_minus_arm": 0.0,
+      "chosen_minus_arm_ci95": [
+        0.0,
+        0.0
+      ],
+      "ci95": [
+        0.7638908787548393,
+        0.8283649962451607
+      ],
+      "design_hash": "67f221a9d45bc2d1",
+      "mean": 0.7961279375,
+      "metrics_mean": {
+        "adoptions": 7.625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633013,
+        "champion_regret": 0.022765,
+        "esteem_validity": 0.619034,
+        "estimate_error": 0.041972,
+        "estimate_loss": 0.001814,
+        "estimate_report": 0.847168,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006187,
+        "mean_true_first": 0.493387,
+        "mean_true_last": 0.497712,
+        "outside_score": 0.805196,
+        "reputation_validity": 0.656189,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:peer_standards_ignored": {
+      "chosen_minus_arm": -0.006685312500000012,
+      "chosen_minus_arm_ci95": [
+        -0.01865228984758461,
+        0.0052816648475845825
+      ],
+      "ci95": [
+        0.7718716923887996,
+        0.8337548076112005
+      ],
+      "design_hash": "e43956d4a530b8c4",
+      "mean": 0.80281325,
+      "metrics_mean": {
+        "adoptions": 7.625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633957,
+        "champion_regret": 0.018166,
+        "esteem_validity": 0.629199,
+        "estimate_error": 0.028542,
+        "estimate_loss": 0.001571,
+        "estimate_report": 0.839209,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006218,
+        "mean_true_first": 0.493909,
+        "mean_true_last": 0.498481,
+        "outside_score": 0.810666,
+        "reputation_validity": 0.672003,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:replication_flipped": {
+      "chosen_minus_arm": -0.008884874999999993,
+      "chosen_minus_arm_ci95": [
+        -0.017081945172297303,
+        -0.0006878048277026861
+      ],
+      "ci95": [
+        0.774166212315021,
+        0.835859412684979
+      ],
+      "design_hash": "04da7c8cd00e6a0d",
+      "mean": 0.8050128125,
+      "metrics_mean": {
+        "adoptions": 4.375,
+        "audit_fails": 0.0,
+        "best_single_true": 0.632009,
+        "champion_regret": 0.016715,
+        "esteem_validity": 0.643755,
+        "estimate_error": 0.02773,
+        "estimate_loss": 0.001103,
+        "estimate_report": 0.838258,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006079,
+        "mean_true_first": 0.492164,
+        "mean_true_last": 0.498212,
+        "outside_score": 0.810528,
+        "reputation_validity": 0.597224,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:strive_on_flipped": {
+      "chosen_minus_arm": 0.050507125,
+      "chosen_minus_arm_ci95": [
+        0.019276783328504927,
+        0.08173746667149508
+      ],
+      "ci95": [
+        0.7013262057369873,
+        0.7899154192630127
+      ],
+      "design_hash": "2cfc0a3e6edcb43a",
+      "mean": 0.7456208125,
+      "metrics_mean": {
+        "adoptions": 13.625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.646789,
+        "champion_regret": 0.055495,
+        "esteem_validity": 0.471732,
+        "estimate_error": 0.047933,
+        "estimate_loss": 0.002553,
+        "estimate_report": 0.806317,
+        "exchanges": 233.875,
+        "mean_peer_loss": 0.006551,
+        "mean_true_first": 0.495945,
+        "mean_true_last": 0.527626,
+        "outside_score": 0.758384,
+        "reputation_validity": 0.479079,
+        "results_posted": 233.875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "ablation:striving_off": {
+      "chosen_minus_arm": 0.01505418749999999,
+      "chosen_minus_arm_ci95": [
+        0.004276468815446868,
+        0.02583190618455311
+      ],
+      "ci95": [
+        0.7473790053316215,
+        0.8147684946683785
+      ],
+      "design_hash": "2b44662f57df9310",
+      "mean": 0.78107375,
+      "metrics_mean": {
+        "adoptions": 0.0,
+        "audit_fails": 0.0,
+        "best_single_true": 0.61073,
+        "champion_regret": 0.007312,
+        "esteem_validity": 0.596737,
+        "estimate_error": 0.032234,
+        "estimate_loss": 0.001284,
+        "estimate_report": 0.819729,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006334,
+        "mean_true_first": 0.49167,
+        "mean_true_last": 0.49167,
+        "outside_score": 0.787495,
+        "reputation_validity": 0.550839,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "baseline:default": {
+      "chosen_minus_arm": 0.10516774999999998,
+      "chosen_minus_arm_ci95": [
+        0.05713610326095229,
+        0.15319939673904767
+      ],
+      "ci95": [
+        0.6332470912780731,
+        0.7486732837219269
+      ],
+      "design_hash": "fe8428214294d3d0",
+      "mean": 0.6909601875,
+      "metrics_mean": {
+        "adoptions": 7.6875,
+        "audit_fails": 0.0,
+        "best_single_true": 0.608716,
+        "champion_regret": 0.051866,
+        "esteem_validity": 0.647166,
+        "estimate_error": 0.05807,
+        "estimate_loss": 0.003456,
+        "estimate_report": 0.766312,
+        "exchanges": 157.0,
+        "mean_peer_loss": 0.006215,
+        "mean_true_first": 0.449431,
+        "mean_true_last": 0.474809,
+        "outside_score": 0.708242,
+        "reputation_validity": 0.665563,
+        "results_posted": 157.0,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "baseline:default_covering": {
+      "chosen_minus_arm": 0.0033885625000000044,
+      "chosen_minus_arm_ci95": [
+        -0.009108683491490969,
+        0.015885808491490978
+      ],
+      "ci95": [
+        0.7614578242194332,
+        0.8240209257805668
+      ],
+      "design_hash": "d86b28c4cf1c674e",
+      "mean": 0.792739375,
+      "metrics_mean": {
+        "adoptions": 4.0625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.630475,
+        "champion_regret": 0.020336,
+        "esteem_validity": 0.61499,
+        "estimate_error": 0.030456,
+        "estimate_loss": 0.001474,
+        "estimate_report": 0.830565,
+        "exchanges": 156.9375,
+        "mean_peer_loss": 0.00621,
+        "mean_true_first": 0.492124,
+        "mean_true_last": 0.500457,
+        "outside_score": 0.800109,
+        "reputation_validity": 0.565135,
+        "results_posted": 156.9375,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    },
+    "chosen": {
+      "chosen_minus_arm": 0.0,
+      "chosen_minus_arm_ci95": [
+        0.0,
+        0.0
+      ],
+      "ci95": [
+        0.7638908787548393,
+        0.8283649962451607
+      ],
+      "design_hash": "5a0aa65c405dde97",
+      "mean": 0.7961279375,
+      "metrics_mean": {
+        "adoptions": 7.625,
+        "audit_fails": 0.0,
+        "best_single_true": 0.633013,
+        "champion_regret": 0.022765,
+        "esteem_validity": 0.619034,
+        "estimate_error": 0.041972,
+        "estimate_loss": 0.001814,
+        "estimate_report": 0.847168,
+        "exchanges": 233.6875,
+        "mean_peer_loss": 0.006187,
+        "mean_true_first": 0.493387,
+        "mean_true_last": 0.497712,
+        "outside_score": 0.805196,
+        "reputation_validity": 0.656189,
+        "results_posted": 233.6875,
+        "settled_without_result": 0.0,
+        "walkouts": 0.0
+      }
+    }
+  },
+  "beacon": "drand",
+  "claimed_value": 0.7961279375,
+  "claimed_value_ci95": [
+    0.7638908787548393,
+    0.8283649962451607
+  ],
+  "design": {
+    "criterion_plan": "prior",
+    "init": "covering",
+    "n_units": 8,
+    "policy": {
+      "adopt_designs": false,
+      "attention_k": 4,
+      "audit_rate": 0.25,
+      "calibration_weight": 4.0,
+      "conformity": 0.0,
+      "crowd_aversion": 0.2,
+      "dev_streams": 5,
+      "esteem_sharpness": 4.0,
+      "exam_floor": 0.3,
+      "exams_per_round": 3,
+      "explore": 0.25,
+      "focused_dev": true,
+      "guess_shade": 1.0,
+      "half_life": 3.0,
+      "holdout_streams": 8,
+      "lead_tol": 0.1,
+      "min_gain": 0.015,
+      "niche": 0.5,
+      "peer_scope": "criteria",
+      "prior_strength": 12.0,
+      "proposals": "tune",
+      "replicate": false,
+      "scan": 2,
+      "second_hand": 0.0,
+      "serve_capacity": 6,
+      "share_design": true,
+      "specialty_count": 3,
+      "specialty_focus": 0.5,
+      "strive_on": "lead",
+      "trials_per_round": 2
+    },
+    "shade": 1.0
+  },
+  "design_hash": "5a0aa65c405dde97",
+  "designer": "designer-A",
+  "heldout_metrics": {
+    "adoptions": 7.625,
+    "audit_fails": 0.0,
+    "best_single_true": 0.633013,
+    "champion_regret": 0.022765,
+    "esteem_validity": 0.619034,
+    "estimate_error": 0.041972,
+    "estimate_loss": 0.001814,
+    "estimate_report": 0.847168,
+    "exchanges": 233.6875,
+    "mean_peer_loss": 0.006187,
+    "mean_true_first": 0.493387,
+    "mean_true_last": 0.497712,
+    "outside_score": 0.805196,
+    "reputation_validity": 0.656189,
+    "results_posted": 233.6875,
+    "settled_without_result": 0.0,
+    "walkouts": 0.0
+  },
+  "heldout_worlds": 16,
+  "notebook_entries": 129,
+  "notebook_head": "70f7f47a85479ce4bb1d1ecff92441e7ddbf2aa043a2a6c3d08ad12625a22a3c",
+  "refinement_rounds": [
+    {
+      "claimed_value": 0.7975675625,
+      "claimed_value_ci95": [
+        0.7718818278370171,
+        0.823253297162983
+      ],
+      "design": {
+        "criterion_plan": "prior",
+        "init": "covering",
+        "n_units": 8,
+        "policy": {
+          "adopt_designs": true,
+          "attention_k": 4,
+          "audit_rate": 0.25,
+          "calibration_weight": 4.0,
+          "conformity": 0.0,
+          "crowd_aversion": 0.2,
+          "dev_streams": 5,
+          "esteem_sharpness": 4.0,
+          "exam_floor": 0.3,
+          "exams_per_round": 3,
+          "explore": 0.25,
+          "focused_dev": true,
+          "guess_shade": 1.0,
+          "half_life": 3.0,
+          "holdout_streams": 8,
+          "lead_tol": 0.1,
+          "min_gain": 0.015,
+          "niche": 0.5,
+          "peer_scope": "criteria",
+          "prior_strength": 12.0,
+          "proposals": "tune",
+          "replicate": false,
+          "scan": 2,
+          "second_hand": 0.0,
+          "serve_capacity": 6,
+          "share_design": true,
+          "specialty_count": 3,
+          "specialty_focus": 0.5,
+          "strive_on": "lead",
+          "trials_per_round": 2
+        },
+        "shade": 1.0
+      },
+      "design_hash": "f1792d3b34df2eca",
+      "round": 1
+    },
+    {
+      "claimed_value": 0.7961279375,
+      "claimed_value_ci95": [
+        0.7638908787548393,
+        0.8283649962451607
+      ],
+      "design": {
+        "criterion_plan": "prior",
+        "init": "covering",
+        "n_units": 8,
+        "policy": {
+          "adopt_designs": false,
+          "attention_k": 4,
+          "audit_rate": 0.25,
+          "calibration_weight": 4.0,
+          "conformity": 0.0,
+          "crowd_aversion": 0.2,
+          "dev_streams": 5,
+          "esteem_sharpness": 4.0,
+          "exam_floor": 0.3,
+          "exams_per_round": 3,
+          "explore": 0.25,
+          "focused_dev": true,
+          "guess_shade": 1.0,
+          "half_life": 3.0,
+          "holdout_streams": 8,
+          "lead_tol": 0.1,
+          "min_gain": 0.015,
+          "niche": 0.5,
+          "peer_scope": "criteria",
+          "prior_strength": 12.0,
+          "proposals": "tune",
+          "replicate": false,
+          "scan": 2,
+          "second_hand": 0.0,
+          "serve_capacity": 6,
+          "share_design": true,
+          "specialty_count": 3,
+          "specialty_focus": 0.5,
+          "strive_on": "lead",
+          "trials_per_round": 2
+        },
+        "shade": 1.0
+      },
+      "design_hash": "5a0aa65c405dde97",
+      "round": 2
+    }
+  ],
+  "reproduce": "python scripts/verify_contest.py contest --check-beacon",
+  "rounds": 10,
+  "self_verification": {
+    "chain_ok": true,
+    "checks": {
+      "anchor": {
+        "failures": [],
+        "rule": "the notebook extends the copies published at pre-registration",
+        "status": "not run"
+      },
+      "beacon": {
+        "failures": [],
+        "rule": "a committed beacon round is revealed by the entry that follows the pre-registration",
+        "status": "passed"
+      },
+      "beacon_randomness": {
+        "failures": [],
+        "rule": "the recorded randomness is what the public beacon published for the committed round",
+        "status": "passed"
+      },
+      "chain": {
+        "failures": [],
+        "rule": "the notebook is an unbroken hash chain",
+        "status": "passed"
+      },
+      "entries": {
+        "failures": [],
+        "rule": "eval and pre-registration entries are well formed; an eval entry's design hashes to its design_hash and its mean is the mean of its values",
+        "status": "passed"
+      },
+      "heldout_arms": {
+        "failures": [],
+        "rule": "the held-out entries are the pre-registered arms, the pre-registered design first",
+        "status": "passed"
+      },
+      "heldout_isolation": {
+        "failures": [],
+        "rule": "held-out evaluations use exactly the pre-registered worlds, and no earlier entry uses them",
+        "status": "passed"
+      },
+      "heldout_report": {
+        "failures": [],
+        "rule": "each held-out report recomputes from its eval entries",
+        "status": "passed"
+      },
+      "heldout_worlds": {
+        "failures": [],
+        "rule": "held-out worlds follow from the hash of the pre-registration entry and the beacon randomness",
+        "status": "passed"
+      },
+      "order": {
+        "failures": [],
+        "rule": "within a round: pre-registration, beacon, worlds, the arms' evaluations, then the report",
+        "status": "passed"
+      },
+      "preregistration": {
+        "failures": [],
+        "rule": "each pre-registered design hashes to its design_hash, is the design the latest selection chose, and was evaluated",
+        "status": "passed"
+      },
+      "rerun_arms": {
+        "failures": [],
+        "rule": "every world of every arm of the last round reproduces: value, metrics and simulated history",
+        "status": "passed"
+      },
+      "rerun_chosen": {
+        "failures": [],
+        "rule": "every held-out world of each chosen design reproduces: value, metrics and simulated history",
+        "status": "passed"
+      },
+      "rerun_sample": {
+        "failures": [],
+        "rule": "one world from each of a random sample of the other experiments reproduces",
+        "status": "passed"
+      },
+      "selection": {
+        "failures": [],
+        "rule": "each selection chose the best of its candidates, by the validation entries that precede it",
+        "status": "passed"
+      },
+      "submission": {
+        "failures": [],
+        "rule": "the submission states the last round's design and the recomputed held-out numbers",
+        "status": "passed"
+      }
+    },
+    "entries": 129,
+    "evaluator_code_now": "e9e603fad683cf326a108fd2",
+    "evaluator_code_recorded": "e9e603fad683cf326a108fd2",
+    "ok": true,
+    "preregistrations": [
+      {
+        "anchor": {
+          "commit": "cf753dc5d54bc1022a11289344d0247247960e19",
+          "kind": "git",
+          "path": "memarena/contest/notebook.jsonl"
+        },
+        "beacon": {
+          "round": 6677107,
+          "source": "drand"
+        },
+        "design_hash": "f1792d3b34df2eca",
+        "entry": 85
+      },
+      {
+        "anchor": {
+          "commit": "1eba243ea300bb74698b2547de3e5085b84f2311",
+          "kind": "git",
+          "path": "memarena/contest/notebook.jsonl"
+        },
+        "beacon": {
+          "round": 6677151,
+          "source": "drand"
+        },
+        "design_hash": "5a0aa65c405dde97",
+        "entry": 112
+      }
+    ],
+    "problems": [],
+    "rerun": 246,
+    "rerun_cells": [
+      [
+        88,
+        0
+      ],
+      [
+        88,
+        1
+      ],
+      [
+        88,
+        2
+      ],
+      [
+        88,
+        3
+      ],
+      [
+        88,
+        4
+      ],
+      [
+        88,
+        5
+      ],
+      [
+        88,
+        6
+      ],
+      [
+        88,
+        7
+      ],
+      [
+        88,
+        8
+      ],
+      [
+        88,
+        9
+      ],
+      [
+        88,
+        10
+      ],
+      [
+        88,
+        11
+      ],
+      [
+        88,
+        12
+      ],
+      [
+        88,
+        13
+      ],
+      [
+        88,
+        14
+      ],
+      [
+        88,
+        15
+      ],
+      [
+        115,
+        0
+      ],
+      [
+        115,
+        1
+      ],
+      [
+        115,
+        2
+      ],
+      [
+        115,
+        3
+      ],
+      [
+        115,
+        4
+      ],
+      [
+        115,
+        5
+      ],
+      [
+        115,
+        6
+      ],
+      [
+        115,
+        7
+      ],
+      [
+        115,
+        8
+      ],
+      [
+        115,
+        9
+      ],
+      [
+        115,
+        10
+      ],
+      [
+        115,
+        11
+      ],
+      [
+        115,
+        12
+      ],
+      [
+        115,
+        13
+      ],
+      [
+        115,
+        14
+      ],
+      [
+        115,
+        15
+      ],
+      [
+        116,
+        0
+      ],
+      [
+        116,
+        1
+      ],
+      [
+        116,
+        2
+      ],
+      [
+        116,
+        3
+      ],
+      [
+        116,
+        4
+      ],
+      [
+        116,
+        5
+      ],
+      [
+        116,
+        6
+      ],
+      [
+        116,
+        7
+      ],
+      [
+        116,
+        8
+      ],
+      [
+        116,
+        9
+      ],
+      [
+        116,
+        10
+      ],
+      [
+        116,
+        11
+      ],
+      [
+        116,
+        12
+      ],
+      [
+        116,
+        13
+      ],
+      [
+        116,
+        14
+      ],
+      [
+        116,
+        15
+      ],
+      [
+        117,
+        0
+      ],
+      [
+        117,
+        1
+      ],
+      [
+        117,
+        2
+      ],
+      [
+        117,
+        3
+      ],
+      [
+        117,
+        4
+      ],
+      [
+        117,
+        5
+      ],
+      [
+        117,
+        6
+      ],
+      [
+        117,
+        7
+      ],
+      [
+        117,
+        8
+      ],
+      [
+        117,
+        9
+      ],
+      [
+        117,
+        10
+      ],
+      [
+        117,
+        11
+      ],
+      [
+        117,
+        12
+      ],
+      [
+        117,
+        13
+      ],
+      [
+        117,
+        14
+      ],
+      [
+        117,
+        15
+      ],
+      [
+        118,
+        0
+      ],
+      [
+        118,
+        1
+      ],
+      [
+        118,
+        2
+      ],
+      [
+        118,
+        3
+      ],
+      [
+        118,
+        4
+      ],
+      [
+        118,
+        5
+      ],
+      [
+        118,
+        6
+      ],
+      [
+        118,
+        7
+      ],
+      [
+        118,
+        8
+      ],
+      [
+        118,
+        9
+      ],
+      [
+        118,
+        10
+      ],
+      [
+        118,
+        11
+      ],
+      [
+        118,
+        12
+      ],
+      [
+        118,
+        13
+      ],
+      [
+        118,
+        14
+      ],
+      [
+        118,
+        15
+      ],
+      [
+        119,
+        0
+      ],
+      [
+        119,
+        1
+      ],
+      [
+        119,
+        2
+      ],
+      [
+        119,
+        3
+      ],
+      [
+        119,
+        4
+      ],
+      [
+        119,
+        5
+      ],
+      [
+        119,
+        6
+      ],
+      [
+        119,
+        7
+      ],
+      [
+        119,
+        8
+      ],
+      [
+        119,
+        9
+      ],
+      [
+        119,
+        10
+      ],
+      [
+        119,
+        11
+      ],
+      [
+        119,
+        12
+      ],
+      [
+        119,
+        13
+      ],
+      [
+        119,
+        14
+      ],
+      [
+        119,
+        15
+      ],
+      [
+        120,
+        0
+      ],
+      [
+        120,
+        1
+      ],
+      [
+        120,
+        2
+      ],
+      [
+        120,
+        3
+      ],
+      [
+        120,
+        4
+      ],
+      [
+        120,
+        5
+      ],
+      [
+        120,
+        6
+      ],
+      [
+        120,
+        7
+      ],
+      [
+        120,
+        8
+      ],
+      [
+        120,
+        9
+      ],
+      [
+        120,
+        10
+      ],
+      [
+        120,
+        11
+      ],
+      [
+        120,
+        12
+      ],
+      [
+        120,
+        13
+      ],
+      [
+        120,
+        14
+      ],
+      [
+        120,
+        15
+      ],
+      [
+        121,
+        0
+      ],
+      [
+        121,
+        1
+      ],
+      [
+        121,
+        2
+      ],
+      [
+        121,
+        3
+      ],
+      [
+        121,
+        4
+      ],
+      [
+        121,
+        5
+      ],
+      [
+        121,
+        6
+      ],
+      [
+        121,
+        7
+      ],
+      [
+        121,
+        8
+      ],
+      [
+        121,
+        9
+      ],
+      [
+        121,
+        10
+      ],
+      [
+        121,
+        11
+      ],
+      [
+        121,
+        12
+      ],
+      [
+        121,
+        13
+      ],
+      [
+        121,
+        14
+      ],
+      [
+        121,
+        15
+      ],
+      [
+        122,
+        0
+      ],
+      [
+        122,
+        1
+      ],
+      [
+        122,
+        2
+      ],
+      [
+        122,
+        3
+      ],
+      [
+        122,
+        4
+      ],
+      [
+        122,
+        5
+      ],
+      [
+        122,
+        6
+      ],
+      [
+        122,
+        7
+      ],
+      [
+        122,
+        8
+      ],
+      [
+        122,
+        9
+      ],
+      [
+        122,
+        10
+      ],
+      [
+        122,
+        11
+      ],
+      [
+        122,
+        12
+      ],
+      [
+        122,
+        13
+      ],
+      [
+        122,
+        14
+      ],
+      [
+        122,
+        15
+      ],
+      [
+        123,
+        0
+      ],
+      [
+        123,
+        1
+      ],
+      [
+        123,
+        2
+      ],
+      [
+        123,
+        3
+      ],
+      [
+        123,
+        4
+      ],
+      [
+        123,
+        5
+      ],
+      [
+        123,
+        6
+      ],
+      [
+        123,
+        7
+      ],
+      [
+        123,
+        8
+      ],
+      [
+        123,
+        9
+      ],
+      [
+        123,
+        10
+      ],
+      [
+        123,
+        11
+      ],
+      [
+        123,
+        12
+      ],
+      [
+        123,
+        13
+      ],
+      [
+        123,
+        14
+      ],
+      [
+        123,
+        15
+      ],
+      [
+        124,
+        0
+      ],
+      [
+        124,
+        1
+      ],
+      [
+        124,
+        2
+      ],
+      [
+        124,
+        3
+      ],
+      [
+        124,
+        4
+      ],
+      [
+        124,
+        5
+      ],
+      [
+        124,
+        6
+      ],
+      [
+        124,
+        7
+      ],
+      [
+        124,
+        8
+      ],
+      [
+        124,
+        9
+      ],
+      [
+        124,
+        10
+      ],
+      [
+        124,
+        11
+      ],
+      [
+        124,
+        12
+      ],
+      [
+        124,
+        13
+      ],
+      [
+        124,
+        14
+      ],
+      [
+        124,
+        15
+      ],
+      [
+        125,
+        0
+      ],
+      [
+        125,
+        1
+      ],
+      [
+        125,
+        2
+      ],
+      [
+        125,
+        3
+      ],
+      [
+        125,
+        4
+      ],
+      [
+        125,
+        5
+      ],
+      [
+        125,
+        6
+      ],
+      [
+        125,
+        7
+      ],
+      [
+        125,
+        8
+      ],
+      [
+        125,
+        9
+      ],
+      [
+        125,
+        10
+      ],
+      [
+        125,
+        11
+      ],
+      [
+        125,
+        12
+      ],
+      [
+        125,
+        13
+      ],
+      [
+        125,
+        14
+      ],
+      [
+        125,
+        15
+      ],
+      [
+        126,
+        0
+      ],
+      [
+        126,
+        1
+      ],
+      [
+        126,
+        2
+      ],
+      [
+        126,
+        3
+      ],
+      [
+        126,
+        4
+      ],
+      [
+        126,
+        5
+      ],
+      [
+        126,
+        6
+      ],
+      [
+        126,
+        7
+      ],
+      [
+        126,
+        8
+      ],
+      [
+        126,
+        9
+      ],
+      [
+        126,
+        10
+      ],
+      [
+        126,
+        11
+      ],
+      [
+        126,
+        12
+      ],
+      [
+        126,
+        13
+      ],
+      [
+        126,
+        14
+      ],
+      [
+        126,
+        15
+      ],
+      [
+        127,
+        0
+      ],
+      [
+        127,
+        1
+      ],
+      [
+        127,
+        2
+      ],
+      [
+        127,
+        3
+      ],
+      [
+        127,
+        4
+      ],
+      [
+        127,
+        5
+      ],
+      [
+        127,
+        6
+      ],
+      [
+        127,
+        7
+      ],
+      [
+        127,
+        8
+      ],
+      [
+        127,
+        9
+      ],
+      [
+        127,
+        10
+      ],
+      [
+        127,
+        11
+      ],
+      [
+        127,
+        12
+      ],
+      [
+        127,
+        13
+      ],
+      [
+        127,
+        14
+      ],
+      [
+        127,
+        15
+      ],
+      [
+        128,
+        0
+      ],
+      [
+        128,
+        1
+      ],
+      [
+        128,
+        2
+      ],
+      [
+        128,
+        3
+      ],
+      [
+        128,
+        4
+      ],
+      [
+        128,
+        5
+      ],
+      [
+        128,
+        6
+      ],
+      [
+        128,
+        7
+      ],
+      [
+        128,
+        8
+      ],
+      [
+        128,
+        9
+      ],
+      [
+        128,
+        10
+      ],
+      [
+        128,
+        11
+      ],
+      [
+        128,
+        12
+      ],
+      [
+        128,
+        13
+      ],
+      [
+        128,
+        14
+      ],
+      [
+        128,
+        15
+      ],
+      [
+        97,
+        0
+      ],
+      [
+        105,
+        1
+      ],
+      [
+        95,
+        3
+      ],
+      [
+        83,
+        6
+      ],
+      [
+        91,
+        5
+      ],
+      [
+        89,
+        12
+      ]
+    ],
+    "round_values": [
+      0.7975675625,
+      0.7961279375
+    ],
+    "sample_seed": "f65b7ad90136a3f144cf5f12927e5da1",
+    "warnings": [
+      "round 1: anchor not checked: the designer reports publishing the pre-registration at entry 85 ({\"commit\": \"cf753dc5d54bc1022a11289344d0247247960e19\", \"kind\": \"git\", \"path\": \"memarena/contest/notebook.jsonl\"}); obtain that copy, confirm it was public before the beacon round was produced, and pass it with --anchored",
+      "round 2: anchor not checked: the designer reports publishing the pre-registration at entry 112 ({\"commit\": \"1eba243ea300bb74698b2547de3e5085b84f2311\", \"kind\": \"git\", \"path\": \"memarena/contest/notebook.jsonl\"}); obtain that copy, confirm it was public before the beacon round was produced, and pass it with --anchored",
+      "the claim is the last of 2 pre-registered rounds, each judged after the earlier ones were seen (round 1: 0.7976, round 2: 0.7961); earlier rounds' worlds are spent"
+    ]
+  },
+  "simulations_run": 674,
+  "wall_seconds": 3966.3
+}
