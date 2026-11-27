@@ -189,6 +189,8 @@ A difference whose interval includes zero is not established by this run.
 
 The package's own check re-ran 246 simulations: all reproduced. Check it yourself with `python scripts/verify_contest.py contest --check-beacon`.
 
+An external verification (`contest/VERIFY.txt`) fetched each committed round from drand and compared the notebook with the copies pushed at each pre-registration: 16 checks passed, the anchor among them. Its output and the commands to repeat it are in that file and in docs/HANDOFF.md.
+
 | Check | Status |
 |---|---|
 | anchor | not run |
@@ -244,10 +246,12 @@ The chosen design's policy with the starting designs and the striving rule varie
 |---|---|---|---|---|---|
 | covering: no striving | 0.800 | 0.803 | 0.461 | 0.0 | — |
 | covering: striving as designed | 0.791 | 0.792 | 0.466 | 9.2 | -0.009 (-0.071 to 0.052) |
-| covering: striving towards peers' whole standards | 0.791 | 0.792 | 0.466 | 9.2 | -0.009 (-0.071 to 0.052) |
+| covering: earlier rule, own specialties | 0.776 | 0.780 | 0.509 | 11.7 | -0.024 (-0.040 to -0.008) |
+| covering: first rule, peers' whole standards | 0.721 | 0.733 | 0.526 | 18.8 | -0.079 (-0.210 to 0.052) |
 | random: no striving | 0.580 | 0.637 | 0.398 | 0.0 | — |
 | random: striving as designed | 0.702 | 0.704 | 0.462 | 12.3 | 0.121 (0.005 to 0.238) |
-| random: striving towards peers' whole standards | 0.702 | 0.704 | 0.462 | 12.3 | 0.121 (0.005 to 0.238) |
+| random: earlier rule, own specialties | 0.606 | 0.648 | 0.493 | 20.3 | 0.025 (-0.163 to 0.213) |
+| random: first rule, peers' whole standards | 0.651 | 0.664 | 0.500 | 22.5 | 0.071 (-0.059 to 0.201) |
 
 6 worlds per row; an interval that includes zero is not an established difference.
 
