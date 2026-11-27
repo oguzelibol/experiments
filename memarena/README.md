@@ -17,20 +17,20 @@ Design: [docs/DESIGN.md](docs/DESIGN.md). Measured results: [docs/RESULTS.md](do
 
 ## Status
 
-**Under revision.** Independent reviews of the first version found that several of its claims did not hold:
-published exam results could be forged, an examiner could pick the paper, the rule-based judges paid for
-answers that committed to nothing, the contest verifier accepted doctored packages, and a rounding bug
-convicted honest units of cheating. This commit holds the rewritten exam protocol and the fixes that are
-finished. The judge and contest-verifier fixes, the designer run under the corrected code and
-`docs/RESULTS.md` are in progress, and `docs/DESIGN.md` still describes the first protocol in sections 4
-and 5. The run recorded earlier (commit `651f6c0`, `contest/`) was produced by the flawed code and has been
-withdrawn.
+- **Evaluation pipeline, exam protocol, society accounts and contest verifier:** rewritten after three rounds
+  of independent review (about 100 findings, each reproduced by a script before it was accepted, all fixed;
+  docs/DESIGN.md section 9). The first recorded designer run (commit `651f6c0`) was produced by code those
+  reviews broke and has been withdrawn.
+- **Striving:** units now improve only where they lead and every exam spreads 30% of its questions over all
+  abilities. On 12 fresh worlds this beats switching striving off by +0.023 (95% CI ±0.023); the earlier
+  rule lost 0.015. The designer's pre-registered held-out run is the real test (`contest/`, docs/RESULTS.md).
+- **No language model has been called**: there is no API key in the build environment. The LLM-backed memory
+  system, judge and brain are implemented and tested against a mock, and the Anthropic client against the real
+  SDK with a mock transport. The offline memory system is a rule-based stand-in that makes large simulations
+  free; on real LongMemEval it scores 0.062 (at the abstention floor), and the audit says so.
 
-Everything here runs offline with the standard library. **No language model has been called**: there was no
-API key in the build environment. The LLM-backed memory system, judge and brain are implemented and tested
-against a mock, and the Anthropic client is tested against the real SDK with a mock transport. The offline
-memory system is a rule-based stand-in that makes large simulations free; on real LongMemEval it scores at
-the abstention floor, and the audit says so.
+To run with a model, set `ANTHROPIC_API_KEY` in the environment (in a cloud session: the environment's
+settings, as an environment variable) and start a new session.
 
 ## Quick start
 
@@ -83,16 +83,20 @@ python scripts/run_unit.py --board http://127.0.0.1:8765 --token secret-a --unit
 ## Run and check the designer
 
 ```bash
-python scripts/run_designer.py --out contest
+python scripts/run_designer.py --out contest --beacon drand --anchor-git --refine-rounds 2
 ```
 
 ```bash
-python scripts/verify_contest.py contest --sample 12
+python scripts/verify_contest.py contest --check-beacon
 ```
 
-`verify_contest.py` checks the notebook's hash chain, that held-out worlds were derived from the notebook
-head at pre-registration and not touched before it, and re-runs recorded experiments, comparing values and
-simulated history hashes.
+Each pre-registration names a future round of the drand public randomness beacon, and with `--anchor-git` the
+notebook is committed and pushed before that round is revealed; the held-out worlds depend on its randomness.
+`verify_contest.py` checks the notebook's hash chain, recomputes every claimed number, checks that the
+held-out worlds follow from the pre-registration and the beacon and were not touched before, re-runs every
+world of every arm of the claimed round and a random sample of everything else, and compares values,
+metrics and simulated history hashes. Pass `--anchored COPY` with the published copy of each pre-registration
+and `--strict` to treat every warning as a failure.
 
 ```bash
 python scripts/make_results.py
@@ -114,5 +118,5 @@ memarena/
   designer/    design genome, search, notebook, live operation
 scripts/       evaluate a benchmark, download data, run and verify the designer, serve a board, run a unit
 contest/       the recorded designer run: notebook.jsonl and submission.json
-tests/         66 tests
+tests/         about 450 tests
 ```
