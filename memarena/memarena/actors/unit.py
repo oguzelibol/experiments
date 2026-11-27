@@ -39,9 +39,9 @@ from ..evalcore.standard import CAPABILITIES, Standard, normalise
 from ..memory.base import MemorySystem, run_system
 from ..memory.heuristic import FEATURES, STYLES, HeuristicMemory, MemoryConfig
 from ..feeds.board import blob_address
-from ..util import ConfigurationError, commit, make_rng, sha256_hex
+from ..util import ConfigurationError, commit, hash_obj, make_rng, sha256_hex
 from .protocol import (
-    check_paper, check_result, derive_exam_share, draw_paper, joint_exam_seed, pack_probes, read_exam, settle,
+    MAX_SHEET_CHARS, check_paper, check_result, derive_exam_share, draw_paper, joint_exam_seed, pack_probes, read_exam, settle,
     share_commitment, unpack_probes,
 )
 
@@ -603,7 +603,7 @@ class Unit:
             self._post("exam.decline", {"xid": xid, "reason": "no exam could be drawn for this seed", "share": st["share"]},
                        to=examinee)
             return
-        st["salt"] = sha256_hex(f"{self.spec.seed}:{self.id}:salt:{examinee}:{xid}")[:20]
+        st["salt"] = hash_obj([str(self.spec.seed), self.id, "salt", examinee, xid])[:20]
         st["exam"] = exam
         probes_blob = self.board.put_blob(pack_probes(exam.probes()))
         self._post(
@@ -663,7 +663,7 @@ class Unit:
             if (streams, questions) != (self.rules.exam_streams, self.rules.exam_questions) or loss != self.rules.peer_loss:
                 st["done"] = True
                 return
-            st["nonce"] = sha256_hex(f"{self.spec.seed}:{self.id}:exam-nonce:{examiner}:{xid}")[:32]
+            st["nonce"] = hash_obj([str(self.spec.seed), self.id, "exam-nonce", examiner, xid])[:32]
             self._post("exam.nonce", {"xid": xid, "nonce": st["nonce"]}, to=examiner)
         elif reading.stage == "offered" and "sheet" not in st:
             self._seal_answers(st, reading)
@@ -687,11 +687,14 @@ class Unit:
         answers = self._answer_exam(probes, examiner, xid)
         mean, sd = self._predict(standard, len(probes), examiner)
         guess = self._make_guess(mean, sd)
+        # A sheet over the size readers grade is settled as empty, so long answers are cut to fit.
+        room = MAX_SHEET_CHARS // (2 * max(1, len(answers)))
+        answers = {pid: (replace(a, text=a.text[:room]) if len(a.text) > room else a) for pid, a in answers.items()}
         sheet = {pid: a.to_dict() for pid, a in sorted(answers.items())}
         st.update(
             sheet=sheet, guess=guess, predicted=mean,
-            answers_nonce=sha256_hex(f"{self.spec.seed}:{self.id}:answers-nonce:{examiner}:{xid}")[:20],
-            guess_nonce=sha256_hex(f"{self.spec.seed}:{self.id}:nonce:{examiner}:{xid}")[:20],
+            answers_nonce=hash_obj([str(self.spec.seed), self.id, "answers-nonce", examiner, xid])[:20],
+            guess_nonce=hash_obj([str(self.spec.seed), self.id, "nonce", examiner, xid])[:20],
         )
         # Commitments only: the answers themselves stay with me until the keys are public.
         self._post(

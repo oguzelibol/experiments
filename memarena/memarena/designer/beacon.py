@@ -83,6 +83,16 @@ class DrandBeacon:
     """
 
     source = "drand"
+    # The League of Entropy's default chain: round 1 at GENESIS, one round every PERIOD seconds.
+    GENESIS = 1595431050
+    PERIOD = 30
+
+    @classmethod
+    def round_time(cls, number: int) -> str:
+        """When a round of the default chain was (or will be) produced, in UTC."""
+        import datetime as _dt
+        at = cls.GENESIS + (int(number) - 1) * cls.PERIOD
+        return _dt.datetime.fromtimestamp(at, _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     def __init__(
         self, url: str = DRAND_URL, lead_rounds: int = 2, timeout: float = 180.0, poll_seconds: float = 3.0,

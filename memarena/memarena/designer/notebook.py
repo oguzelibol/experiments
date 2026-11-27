@@ -33,6 +33,16 @@ def _entry_hash(index: int, kind: str, body: Mapping, prev: str) -> str:
     return sha256_hex(canonical_json({"index": index, "kind": kind, "body": body, "prev": prev}))
 
 
+def _no_duplicates(pairs):
+    """A JSON object in which a key occurs twice means different things to different readers: refuse it."""
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
 class Notebook:
     def __init__(self, path: str | None = None):
         self.path = path
@@ -43,7 +53,7 @@ class Notebook:
                     if not line.strip():
                         continue
                     try:
-                        self.entries.append(json.loads(line))
+                        self.entries.append(json.loads(line, object_pairs_hook=_no_duplicates))
                     except (ValueError, RecursionError) as exc:
                         raise ValueError(f"notebook failed verification: line {number} is not JSON") from exc
             ok, why = self.verify()
@@ -77,11 +87,11 @@ class Notebook:
         """
         prev = NOTEBOOK_GENESIS
         for n, e in enumerate(self.entries, start=1):
-            if not isinstance(e, dict) or not _ENTRY_KEYS <= e.keys():
-                return False, f"entry {n} is not a notebook entry"
+            if not isinstance(e, dict) or set(e.keys()) != _ENTRY_KEYS:
+                return False, f"entry {n} is not a notebook entry (it must have exactly the fields {sorted(_ENTRY_KEYS)})"
             if not isinstance(e["kind"], str) or not isinstance(e["body"], dict):
                 return False, f"entry {n} is not a notebook entry"
-            if e["index"] != n:
+            if type(e["index"]) is not int or e["index"] != n:
                 return False, f"entry {n} is out of order"
             if e["prev"] != prev:
                 return False, f"entry {n} does not link to its predecessor"

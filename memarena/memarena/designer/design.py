@@ -41,6 +41,16 @@ CRITERION_PLANS = ("prior", "official", "strict", "panel", "prior_mixture")
 INITS = ("random", "covering")
 
 
+MAX_UNITS = 24  # a recorded design with more units is not one this code simulates
+
+
+def _bounded_units(n) -> int:
+    n = int(n)
+    if not 1 <= n <= MAX_UNITS:
+        raise ValueError(f"n_units must be between 1 and {MAX_UNITS}")
+    return n
+
+
 @dataclass(frozen=True)
 class Design:
     n_units: int = 8
@@ -64,7 +74,7 @@ class Design:
     @staticmethod
     def from_dict(d: Mapping) -> "Design":
         return Design(
-            n_units=int(d.get("n_units", 8)), policy=UnitPolicy.from_dict(d.get("policy", {})),
+            n_units=_bounded_units(d.get("n_units", 8)), policy=UnitPolicy.from_dict(d.get("policy", {})),
             init=d.get("init", "random"), criterion_plan=d.get("criterion_plan", "prior"),
             shade=float(d.get("shade", 1.0)),
         )

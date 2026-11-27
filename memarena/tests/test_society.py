@@ -1117,7 +1117,9 @@ def test_the_remembered_grade_depends_on_every_answer_and_on_the_standard():
     standard = Standard({"judge_lenient|detect|micro": 1.0})
     cfg = standard.gen_config(2, 6)
     paper = protocol._paper("memo-seed", cfg)
-    assert protocol._paper("memo-seed", cfg) is paper and protocol.draw_paper("memo-seed", cfg) is paper.exam
+    assert protocol._paper("memo-seed", cfg) is paper
+    drawn = protocol.draw_paper("memo-seed", cfg)  # a copy: a caller that changes it changes nothing for others
+    assert drawn is not paper.exam and drawn.manifest_hash() == paper.exam.manifest_hash()
     assert protocol._paper("memo-seed-2", cfg) is not paper
     assert protocol._paper("memo-seed", dataclasses.replace(cfg, questions_per_stream=5)) is not paper
     module = EvaluationModule(standard, FAMILY)
@@ -1173,3 +1175,87 @@ def test_an_unmeasured_unit_is_not_chosen_over_a_measured_good_one():
     from memarena.sim.collective import _lowest
     cons = {"temporal-reasoning": {"a": (0.9, 30.0), "b": (0.2, 30.0)}}
     assert _lowest(cons, "temporal-reasoning", 0.5) == 0.2 and _lowest(cons, "multi-session", 0.5) == 0.5
+
+
+# ------------------------------------------- findings of the third independent check
+
+def test_names_with_separators_never_give_an_examiner_the_same_share_twice():
+    assert derive_exam_share("s", "ex", "a", "b|c") != derive_exam_share("s", "ex", "a|b", "c")
+    assert share_commitment("x", "a", "b|c") != share_commitment("x", "a|b", "c")
+    assert joint_exam_seed("a", "b|c", "x") != joint_exam_seed("a|b", "c", "x")
+
+
+def test_an_offer_or_keys_after_the_examiners_deadline_cannot_reopen_an_abandoned_exam():
+    desk = Desk()
+    desk.request(); desk.ready(); desk.send_nonce()
+    desk.tick(2)
+    first = desk.settle()
+    assert first.stage == "abandoned" and first.fault == "examiner" and not first.pending
+    cache: dict = {}
+    assert audit_record(desk.board, FAMILY, cache).walkouts == {"ex": 1}
+    desk.offer(); desk.tick(2); desk.keys()
+    later = desk.settle()
+    assert (later.stage, later.final_seq) == (first.stage, first.final_seq)
+    assert audit_record(desk.board, FAMILY).walkouts == audit_record(desk.board, FAMILY, cache).walkouts == {"ex": 1}
+
+    # unsealed, keys never revealed: late keys leave it abandoned rather than settling the examinee at zero
+    desk = Desk()
+    desk.upto_offer(); desk.tick(4)
+    assert desk.settle().stage == "abandoned"
+    desk.keys()
+    assert desk.settle().stage == "abandoned" and desk.accounts()[0] == []
+
+
+def test_a_call_off_counts_only_if_no_paper_can_be_drawn():
+    for share in (None, "made-up"):
+        desk = Desk()
+        desk.request(); desk.ready(); desk.send_nonce()
+        desk.board.post("ex", "exam.decline", {"xid": desk.xid, "share": share or desk.share}, to="st")
+        verdict = desk.settle()
+        assert verdict.stage == "abandoned" and verdict.fault == "examiner", share
+        assert desk.accounts()[2] == {"ex": 1}
+        desk.offer()  # an offer after its own call-off does not count either
+        assert desk.settle().stage == "abandoned"
+
+
+def test_a_stray_post_before_the_request_does_not_freeze_the_exam_for_a_cached_reader():
+    desk = Desk()
+    cache: dict = {}
+    desk.send_nonce()  # under an id nobody has requested yet
+    audit_record(desk.board, FAMILY, cache)
+    desk.request(); desk.ready(); desk.send_nonce(); desk.offer(); desk.seal(); desk.keys(); desk.open(); desk.tick()
+    verdict = desk.settle()
+    assert verdict.ok
+    payload = {"xid": desk.xid, "examinee": "st", "score": verdict.score,
+               "capability": {c: [s, n] for c, (s, n) in verdict.capability.items()}, "receipt": verdict.receipt,
+               "guess": verdict.guess, "guess_valid": verdict.guess_valid, "loss": verdict.loss, "void": verdict.void}
+    desk.board.post("ex", "exam.result", payload, to="st")
+    cached, fresh = audit_record(desk.board, FAMILY, cache), audit_record(desk.board, FAMILY)
+    assert not cached.cheats and not fresh.cheats and len(cached.signals) == len(fresh.signals) == 1
+
+
+def test_changing_a_verdicts_receipt_changes_nothing_for_the_next_reader():
+    desk = Desk()
+    desk.upto_offer(); desk.seal(); desk.keys(); desk.open(); desk.tick()
+    first = desk.settle()
+    first.receipt["capability"].clear()
+    first.receipt["standard"].clear()
+    assert desk.settle().receipt == settle(desk.board, FAMILY, "ex", "st", desk.xid).receipt
+    assert desk.settle().receipt["capability"]
+
+
+def test_an_honest_units_sheet_always_fits_what_readers_grade():
+    from memarena.actors.protocol import MAX_SHEET_CHARS
+    from memarena.benchmark.schema import Answer as A
+
+    class Wordy(Unit):
+        def _answer_exam(self, probes, examiner, xid):
+            return {p.probe_id: A("Lisbon. " + "x" * 40_000) for p in probes}
+
+    scenario, specs = small_world(seed=8, rounds=3)
+    sim = Simulation(scenario, [replace(specs[0], kind="honest")] + list(specs[1:]))
+    sim.units[specs[0].unit_id].__class__ = Wordy
+    sim.run()
+    sheets = [len(canonical_json(sim.board.get_blob(p.body["answers"]))) for p in sim.board.read(0, kinds=["exam.open"])
+              if p.author == specs[0].unit_id]
+    assert sheets and max(sheets) <= MAX_SHEET_CHARS

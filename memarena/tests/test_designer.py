@@ -184,7 +184,13 @@ def test_full_pipeline_preregisters_and_verifies(package, tmp_path):
     # every held-out world of the chosen design was re-run, and three other experiments were sampled
     chosen_entry = heldout_entries(package.entries)[0]["index"]
     assert [cell for cell in check["rerun_cells"] if cell[0] == chosen_entry] == [[chosen_entry, 0], [chosen_entry, 1]]
-    assert len(check["rerun_cells"]) == 5 and check["checks"]["rerun_sample"]["status"] == "passed"
+    # every world of every other arm of the round too, since the submission compares the design with them
+    arms = [e["index"] for e in heldout_entries(package.entries)]
+    for index in arms:
+        assert sum(1 for cell in check["rerun_cells"] if cell[0] == index) == 2
+    others = [cell for cell in check["rerun_cells"] if cell[0] not in arms]
+    assert len({tuple(c) for c in others}) >= 3
+    assert check["checks"]["rerun_sample"]["status"] == check["checks"]["rerun_arms"]["status"] == "passed"
     # nothing outside the notebook fixed these worlds, and verification says so
     assert any("depend only on the notebook head, which the designer controls" in w for w in check["warnings"])
 
@@ -332,7 +338,7 @@ def test_grinding_the_head_moves_the_worlds_unless_a_beacon_decides_them():
     """Doctoring 3: throw-away notes before the pre-registration re-roll the held-out worlds."""
     def preregistered(note, beacon=None, anchor=None):
         notebook = Notebook()
-        designer = Designer("grinder", notebook, workers=1, seed="g")
+        designer = Designer("grinder", notebook, workers=1, seed="g", world_nonce="n")
         notebook.add("note", {"note": note})
         return notebook, designer.preregister(TINY, n_worlds=2, rounds=2, beacon=beacon, anchor=anchor)["worlds"]
 
@@ -389,7 +395,11 @@ def pending(tmp_path):
     path = str(tmp_path / "notebook.jsonl")
     notebook = Notebook(path)
     designer = Designer("test", notebook, workers=1)
-    notebook.add("selection", {"candidates": [], "chosen": TINY.hash()})
+    # a validation result recorded by hand (nothing here is re-run) and the selection it supports
+    notebook.add("eval", {"stage": "validation", "design_hash": TINY.hash(), "design": TINY.to_dict(),
+                          "scenarios": ["validate:by-hand:0"], "rounds": 2, "values": [0.5], "mean": 0.5,
+                          "board_heads": ["0" * 64], "metrics_mean": {}})
+    notebook.add("selection", {"candidates": [{"design_hash": TINY.hash(), "validation_mean": 0.5}], "chosen": TINY.hash()})
     published = str(tmp_path / "published.jsonl")
 
     def anchor(nb):
@@ -443,16 +453,16 @@ def test_a_reveal_that_does_not_match_the_commitment_is_rejected(pending, tmp_pa
         return check
 
     def another_round(entries):  # reveal a round other than the committed one
-        entries[4]["body"]["round"] = 7
+        entries[5]["body"]["round"] = 7
 
     def chosen_worlds(entries):  # keep the randomness, list worlds that do not follow from it
-        entries[5]["body"]["worlds"] = heldout_world_seeds("0" * 64, "f" * 64, 2)
+        entries[6]["body"]["worlds"] = heldout_world_seeds("0" * 64, "f" * 64, 2)
 
     def no_reveal(entries):  # drop the beacon entry and derive the worlds from the notebook alone
-        del entries[4]
-        entries[4]["body"]["worlds"] = [f"heldout:{pending.notebook.entries[3]['hash'][:20]}:{k}" for k in range(2)]
+        del entries[5]
+        entries[5]["body"]["worlds"] = [f"heldout:{pending.notebook.entries[4]['hash'][:20]}:{k}" for k in range(2)]
 
-    assert [e["kind"] for e in pending.notebook.entries[3:]] == ["preregistration", "beacon", "heldout_worlds"]
+    assert [e["kind"] for e in pending.notebook.entries[4:]] == ["preregistration", "beacon", "heldout_worlds"]
     assert failed(relinked(another_round)["checks"]) == {"beacon"}
     assert failed(relinked(chosen_worlds)["checks"]) == {"heldout_worlds"}
     assert failed(relinked(no_reveal)["checks"]) == {"beacon", "heldout_worlds"}
@@ -470,7 +480,7 @@ def test_a_notebook_rewritten_after_publication_fails_the_anchor_check(pending, 
     # re-derived for the new chain.  The result is a valid notebook; only the published copy shows the rewrite.
     entries = copy.deepcopy(pending.notebook.entries)
     rewritten = Notebook(str(tmp_path / "rewritten.jsonl"))
-    for entry in entries[:3] + [{"kind": "note", "body": {"note": "housekeeping"}}] + entries[3:5]:
+    for entry in entries[:4] + [{"kind": "note", "body": {"note": "housekeeping"}}] + entries[4:6]:
         rewritten.add(entry["kind"], entry["body"])
     prereg, beacon = rewritten.entries[-2:]
     rewritten.add("heldout_worlds", {**worlds, "worlds": heldout_world_seeds(prereg["hash"], beacon["body"]["randomness"], 2)})
@@ -488,8 +498,8 @@ def test_an_abandoned_preregistration_fails_verification(pending):
     notebook.add("heldout_worlds", {"anchor": None, "worlds": heldout_world_seeds(again["hash"], None, 2)})
     check = Designer.verify_notebook(pending.path, sample=0, workers=1)
     assert failed(check["checks"]) == {"preregistration"}
-    assert check["problems"] == [f"preregistration: entry {first['index']}: was abandoned without a held-out report, "
-                                 "which is how an unfavourable draw of worlds would be discarded"]
+    assert f"preregistration: entry {first['index']}: was abandoned without a held-out report, " \
+           "which is how an unfavourable draw of worlds would be discarded" in check["problems"]
 
 
 def test_drand_beacon_commits_ahead_and_waits_for_its_round():
@@ -658,7 +668,7 @@ def test_two_round_refinement_with_a_beacon_verifies(tmp_path):
     # its candidates were compared on validation worlds no earlier round used, and the pick was pre-registered
     validation = [e for e in notebook.of_kind("eval") if e["body"]["stage"] == "validation" and e["index"] > markers[1]["index"]]
     assert [e["body"]["design_hash"] for e in validation] == [design.hash() for _, design in expected]
-    assert all(e["body"]["scenarios"] == ["validate2:t:0"] for e in validation)
+    assert all(len(e["body"]["scenarios"]) == 1 and e["body"]["scenarios"][0].startswith("validate2:t:") for e in validation)
     assert notebook.of_kind("selection")[-1]["body"]["chosen"] == second.hash()
     assert second_report["design_hash"] == second.hash() and second_report["arms"]["chosen"]["chosen_minus_arm"] == 0.0
 
@@ -730,3 +740,20 @@ def test_the_societys_accounts_do_not_read_private_unit_state():
     for unit in sim.units.values():
         unit.version_round = 99
     assert sim.collective()["champions"] == reported["champions"]
+
+
+def test_a_notebook_entry_cannot_carry_fields_outside_its_hash_or_duplicate_keys(tmp_path):
+    nb = Notebook(str(tmp_path / "a.jsonl"))
+    nb.add("header", {"designer": "x"})
+    good = (tmp_path / "a.jsonl").read_text()
+    entry = json.loads(good)
+    for altered in ({**entry, "values": [0.99]}, {**entry, "index": True}, {**entry, "index": 1.0}):
+        (tmp_path / "b.jsonl").write_text(json.dumps(altered) + "\n")
+        with pytest.raises(ValueError):
+            Notebook(str(tmp_path / "b.jsonl"))
+    (tmp_path / "c.jsonl").write_text(good.replace('"kind": "header"', '"kind": "header", "kind": "header"'))
+    with pytest.raises(ValueError, match="duplicate"):
+        Notebook(str(tmp_path / "c.jsonl"))
+    empty = tmp_path / "d.jsonl"
+    empty.write_text("")
+    assert not Designer.verify_notebook(str(empty), sample=0, workers=1)["ok"]

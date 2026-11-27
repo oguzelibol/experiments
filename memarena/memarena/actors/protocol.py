@@ -56,6 +56,7 @@ afterwards are the settled ones it returns, never the ones in the post.
 
 from __future__ import annotations
 
+import copy
 import math
 import threading
 from collections import OrderedDict
@@ -161,18 +162,22 @@ def instances_from(probes: Sequence[Probe], keys: Sequence[Mapping]) -> list[Ins
 
 
 def derive_exam_share(private_seed: Any, unit_id: str, examinee: str, xid: str) -> str:
-    """The examiner's share of one exam's seed.  One-way in the private seed, and never the same for two exams."""
-    return sha256_hex(f"exam-share|{private_seed}|{unit_id}|{examinee}|{xid}")[:40]
+    """The examiner's share of one exam's seed.  One-way in the private seed, and never the same for two exams.
+
+    The parts are hashed as a JSON list, never joined with a separator: names and exam ids may contain any
+    character, and with a separator ("a", "b|c") and ("a|b", "c") would give one examiner the same share twice.
+    """
+    return hash_obj(["exam-share", str(private_seed), unit_id, examinee, xid])[:40]
 
 
 def share_commitment(share: str, examinee: str, xid: str) -> str:
     """Commitment to a seed share, bound to the exam it is for: it cannot be shown again for another."""
-    return sha256_hex(f"exam-share-commit|{share}|{examinee}|{xid}")
+    return hash_obj(["exam-share-commit", share, examinee, xid])
 
 
 def joint_exam_seed(share: str, nonce: str, xid: str) -> str:
     """Seed of one exam: fixed only once both parties have contributed."""
-    return "exam-" + sha256_hex(f"exam-seed|{share}|{nonce}|{xid}")[:32]
+    return "exam-" + hash_obj(["exam-seed", share, nonce, xid])[:32]
 
 
 def _num(x: Any) -> float | None:
@@ -388,14 +393,20 @@ def _read_exam(board, examiner, examinee, xid, index, clock_author) -> Reading:
         return Reading(**base, stage="ready", reason="the named examinee did not contribute to the exam seed")
     base["nonce"] = nonce
 
-    # From here on the examiner knows the paper, and owes the exam.
-    offer = first(ours, "exam.offer", nonce.seq)
+    # From here on the examiner knows the paper, and owes the exam.  Every examiner post counts only
+    # if it is in time: once a deadline has passed, nothing posted later can reopen the exam.
+    due = deadline(nonce.seq)
+    shown = first(ours, "exam.decline", nonce.seq,
+                  lambda p: isinstance(p.body.get("share"), str) and (due is None or p.seq < due))
+    offer = first(ours, "exam.offer", nonce.seq,
+                  lambda p: (due is None or p.seq < due) and (shown is None or p.seq < shown.seq))
     if offer is None:
-        due = deadline(nonce.seq)
-        shown = first(ours, "exam.decline", nonce.seq, lambda p: isinstance(p.body.get("share"), str))
-        if shown is not None and (due is None or shown.seq < due):
-            return Reading(**base, stage="called-off", decline=shown, final_seq=shown.seq,
-                           reason="the examiner says no paper can be drawn for this seed")
+        if shown is not None:
+            if _call_off_holds(board, index, base, shown):
+                return Reading(**base, stage="called-off", decline=shown, final_seq=shown.seq,
+                               reason="the examiner showed that no paper can be drawn for this seed")
+            return Reading(**base, stage="abandoned", fault="examiner", decline=shown, final_seq=shown.seq,
+                           reason="the examiner called the exam off, but a paper can be drawn for this seed")
         if due is None:
             return Reading(**base, stage="seeded", reason="the examiner has not made its offer yet")
         return Reading(**base, stage="abandoned", fault="examiner", final_seq=due, reason="the examiner made no offer for this exam")
@@ -411,6 +422,9 @@ def _read_exam(board, examiner, examinee, xid, index, clock_author) -> Reading:
     if sealed is not None and ((seal_due is not None and sealed.seq > seal_due) or (keys is not None and sealed.seq > keys.seq)):
         sealed = None  # too late to count
     if sealed is None:
+        late = deadline(seal_due) if seal_due is not None else None
+        if keys is not None and late is not None and keys.seq > late:
+            keys = None  # revealed after the examiner's own deadline: the exam was already abandoned
         if keys is not None:
             base["keys"] = keys
             if seal_due is None or keys.seq < seal_due:
@@ -420,7 +434,6 @@ def _read_exam(board, examiner, examinee, xid, index, clock_author) -> Reading:
                            reason="the examinee saw the questions and sealed nothing in time")
         if seal_due is None:
             return Reading(**base, stage="offered", reason="the examinee has not sealed its answers yet")
-        late = deadline(seal_due)
         if late is None:
             return Reading(**base, stage="unsealed", reason="the examinee sealed nothing in time; the keys are due")
         return Reading(**base, stage="abandoned", fault="examiner", final_seq=late,
@@ -500,14 +513,11 @@ class _Paper:
         self.key = key
         self.exam = exam
         self.probes_address = sha256_hex(canonical_json(pack_probes(exam.probes())))
-        self._commitments: dict[str, str] = {}
+        # the keys as text, fixed now: nothing a caller does to an object later changes what is compared
+        self._keys_text = canonical_json([i.key.to_dict() for i in exam.instances])
 
     def keys_commitment(self, salt: str) -> str:
-        if salt not in self._commitments:
-            if len(self._commitments) > 16:
-                self._commitments.clear()
-            self._commitments[salt] = keys_commitment(self.exam.instances, salt)
-        return self._commitments[salt]
+        return sha256_hex("keys:" + salt + ":" + self._keys_text)
 
 
 def _paper(seed: str, cfg: Any) -> _Paper:
@@ -517,8 +527,8 @@ def _paper(seed: str, cfg: Any) -> _Paper:
 
 
 def draw_paper(seed: str, cfg: Any):
-    """The exam ``seed`` gives under ``cfg``: the same object ``settle`` regenerates.  Treat it as read-only."""
-    return _paper(seed, cfg).exam
+    """The exam ``seed`` gives under ``cfg``, as ``settle`` regenerates it.  A copy: the caller may change it."""
+    return copy.deepcopy(_paper(seed, cfg).exam)
 
 
 def _grade(module: EvaluationModule, paper: _Paper, answers: Mapping[str, Answer], salt: str):
@@ -584,6 +594,28 @@ def _check_paper(board, reading, index):
     if paper.keys_commitment(salt) != offer.body.get("keys_commit"):
         return False, "the answer keys are not the ones generated from the joint seed and committed to in the offer", None, None, None
     return True, "ok", standard, salt, paper
+
+
+def _call_off_holds(board: Any, index: "ExamIndex | None", base: Mapping, decline: Any) -> bool:
+    """Does an examiner's call-off show what it claims: that the joint seed gives no paper under its standard?"""
+    try:
+        share, nonce = decline.body.get("share"), base["nonce"].body.get("nonce")
+        examiner, examinee, xid = base["examiner"], base["examinee"], base["xid"]
+        if not _text(share) or base["ready"].body.get("share_commit") != share_commitment(share, examinee, xid):
+            return False
+        profiles = index.profiles.get(examiner, []) if index is not None else board.feed(examiner, kinds=["profile"])
+        profiles = [p for p in profiles if p.seq < base["request"].seq]
+        if not profiles:
+            return False
+        standard = Standard.from_dict(profiles[-1].body["standard"])
+        streams, questions, _loss = base["terms"]
+        try:
+            _paper(joint_exam_seed(share, nonce, xid), standard.gen_config(streams, questions))
+        except ValueError:
+            return True
+        return False
+    except Exception:  # noqa: BLE001 - unreadable evidence proves nothing
+        return False
 
 
 def called_off(board: Any, examiner: str, examinee: str, xid: str, index: ExamIndex | None = None) -> bool:
@@ -700,7 +732,7 @@ def _settle(board, family, examiner, examinee, xid, index, clock_author) -> Verd
     return Verdict(
         True, "ok", score=score, n_items=int(evaluation.receipt["n_items"]),
         capability={c: (float(s), int(n)) for c, (s, n) in evaluation.capability.items()},
-        guess=guess, guess_valid=guess_valid, loss=float(loss), void=reading.void, receipt=dict(evaluation.receipt),
+        guess=guess, guess_valid=guess_valid, loss=float(loss), void=reading.void, receipt=copy.deepcopy(dict(evaluation.receipt)),
         paper=sha256_hex("paper|" + joint_exam_seed(share, nonce, reading.xid)), **common,
     )
 

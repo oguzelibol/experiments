@@ -48,13 +48,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from memarena.designer.search import Designer  # noqa: E402
 
 
+def _no_duplicates(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError(f"duplicate key {key!r}")
+        out[key] = value
+    return out
+
+
 def _read_submission(path: str) -> tuple[dict | None, str | None]:
     """The parsed submission, or the reason it cannot be used.  A package may come without one."""
     if not os.path.exists(path):
         return None, None
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            submission = json.load(fh)
+            submission = json.load(fh, object_pairs_hook=_no_duplicates)
     except (ValueError, RecursionError) as exc:
         return None, f"submission: submission.json is not JSON ({exc})"
     if not isinstance(submission, dict):
@@ -76,6 +85,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                          "and a beacon that cannot be reached then fails verification")
     ap.add_argument("--anchored", action="append", default=[], metavar="COPY",
                     help="a copy of the notebook as it was published at a pre-registration (repeat for several rounds)")
+    ap.add_argument("--confirmed-timing", action="store_true",
+                    help="you have checked that each published copy (--anchored) was public before its beacon round "
+                         "was produced; the verifier prints each round's time but cannot see when a copy was published")
+    ap.add_argument("--notebook-only", action="store_true", help="accept a package without submission.json")
     ap.add_argument("--strict", action="store_true", help="treat every warning as a failure")
     args = ap.parse_args(argv)
 
@@ -83,8 +96,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     check = Designer.verify_notebook(
         os.path.join(args.package, "notebook.jsonl"), sample=None if args.all else args.sample, seed=args.seed,
         workers=args.workers, submission=submission, check_beacon=args.check_beacon, anchored=args.anchored,
+        confirmed_timing=args.confirmed_timing,
     )
     problems = check["problems"] + ([unusable] if unusable else [])
+    if submission is None and not unusable and not args.notebook_only:
+        problems.append("submission: the package has no submission.json (pass --notebook-only to check the notebook alone)")
     if args.strict:
         problems += [f"strict: {warning}" for warning in check["warnings"]]
 
@@ -102,6 +118,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"FAILED: {problem}", file=sys.stderr)
     for warning in [] if args.strict else check["warnings"]:
         print(f"WARNING: {warning}", file=sys.stderr)
+    print(f"re-ran {check['rerun']} simulations covering {len(check['rerun_cells'])} recorded world results", file=sys.stderr)
+    if check.get("round_values"):
+        print("held-out value by pre-registered round: "
+              + ", ".join("—" if v is None else f"{v:.4f}" for v in check["round_values"]), file=sys.stderr)
     print(f"sample seed {check['sample_seed']} (repeat this verification with --seed)", file=sys.stderr)
 
     print(json.dumps({

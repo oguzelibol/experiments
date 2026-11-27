@@ -290,7 +290,8 @@ Anchor = Callable[[Notebook], Optional[Mapping]]
 class Designer:
     """Carries out the method described at the top of this module, logging every step in one notebook."""
 
-    def __init__(self, designer_id: str, notebook: Notebook, workers: int = 4, seed: int | str = 0, proposer: Any = None):
+    def __init__(self, designer_id: str, notebook: Notebook, workers: int = 4, seed: int | str = 0, proposer: Any = None,
+                 world_nonce: str | None = None):
         self.id = designer_id
         self.notebook = notebook
         self.workers = max(1, workers)
@@ -299,11 +300,17 @@ class Designer:
         self._cache: dict[tuple, dict] = {}
         self.sims_run = 0
         if not notebook.entries:
-            notebook.add("header", {"designer": designer_id, "seed": str(seed), "evaluator_code": code_hash()})
+            # Training and validation worlds are named after a random nonce, recorded here.  Units are built from a
+            # hash of the world's name; with a name like "train:0:3" a unit could guess the name by trying, and
+            # recover the world's hidden evaluator.  The notebook is not something units see.
+            notebook.add("header", {"designer": designer_id, "seed": str(seed), "evaluator_code": code_hash(),
+                                    "world_nonce": world_nonce if world_nonce is not None else os.urandom(16).hex()})
             notebook.add("round", {
                 "round": 1, "informed_by": None, "spent_worlds": [],
                 "note": "Search and validation use training and validation worlds only; no held-out world exists yet.",
             })
+        header = notebook.entries[0]["body"] if notebook.entries and isinstance(notebook.entries[0].get("body"), dict) else {}
+        self.world_tag = f"{seed}:{header['world_nonce']}" if isinstance(header.get("world_nonce"), str) else str(seed)
 
     # ----------------------------------------------------------- experiments
     def _run(self, jobs: Sequence[Mapping]) -> list[dict]:
@@ -354,7 +361,7 @@ class Designer:
     ) -> list[dict]:
         """Evolve designs on training worlds.  Returns the finalists' rung-2 entries."""
         rng = make_rng("designer", self.seed, "search")
-        train = [f"train:{self.seed}:{k}" for k in range(max(rung1[0], rung2[0]))]
+        train = [f"train:{self.world_tag}:{k}" for k in range(max(rung1[0], rung2[0]))]
         pop = self.initial_population(population)
         best: dict[str, dict] = {}
         for g in range(generations):
@@ -400,7 +407,7 @@ class Designer:
 
     def validate(self, finalists: Sequence[Mapping], n_worlds: int = 8, rounds: int = 10) -> Design:
         """Choose among finalists on worlds the search never touched."""
-        worlds = [f"validate:{self.seed}:{k}" for k in range(n_worlds)]
+        worlds = [f"validate:{self.world_tag}:{k}" for k in range(n_worlds)]
         return self._select([Design.from_dict(e["design"]) for e in finalists], worlds, rounds)
 
     # ------------------------------------------------------------- held out
@@ -522,7 +529,7 @@ class Designer:
                 "own pre-registration."
             ),
         })
-        worlds = [f"validate{number}:{self.seed}:{k}" for k in range(n_validation_worlds)]
+        worlds = [f"validate{number}:{self.world_tag}:{k}" for k in range(n_validation_worlds)]
         pick = self._select([design for _, design in candidates], worlds, rounds)
         self.preregister(pick, n_worlds, rounds, baselines, beacon, anchor)
         return pick, self.heldout(pick, baselines)
@@ -532,7 +539,7 @@ class Designer:
     def verify_notebook(
         path: str, sample: int | None = 6, seed: int | str | None = None, workers: int = 4,
         submission: Mapping | None = None, check_beacon: bool = False,
-        beacons: Mapping[str, Beacon] | None = None, anchored: Sequence[str] = (),
+        beacons: Mapping[str, Beacon] | None = None, anchored: Sequence[str] = (), confirmed_timing: bool = False,
     ) -> dict:
         """Check a notebook, and the submission that rests on it, the way a rival designer would.
 
@@ -568,7 +575,7 @@ class Designer:
         what was re-run as ``[entry, world]`` pairs, and passing
         ``sample_seed`` back as ``seed`` repeats the sample.
         """
-        return _verify(path, sample, seed, workers, submission, check_beacon, beacons, anchored)
+        return _verify(path, sample, seed, workers, submission, check_beacon, beacons, anchored, confirmed_timing)
 
 
 # -------------------------------------------------------------- verification
@@ -587,8 +594,22 @@ _CHECKS = {
     "heldout_report": "each held-out report recomputes from its eval entries",
     "submission": "the submission states the last round's design and the recomputed held-out numbers",
     "rerun_chosen": "every held-out world of each chosen design reproduces: value, metrics and simulated history",
-    "rerun_sample": "one world from each of a random sample of the other eval entries reproduces",
+    "rerun_arms": "every world of every arm of the last round reproduces: value, metrics and simulated history",
+    "rerun_sample": "one world from each of a random sample of the other experiments reproduces",
+    "selection": "each selection chose the best of its candidates, by the validation entries that precede it",
+    "order": "within a round: pre-registration, beacon, worlds, the arms' evaluations, then the report",
 }
+
+# Entry kinds this code writes.  Any other kind is reported.
+_KNOWN_KINDS = {"header", "round", "eval", "generation", "note", "selection", "preregistration", "beacon",
+                "heldout_worlds", "heldout_report"}
+
+# Bounds on what a verifier is prepared to re-run: the cost of a check is set by the party being checked.
+_MAX_ROUNDS = 50
+_MAX_WORLDS = 64
+
+# The baselines whose names say what they are: a package may not register a weaker design under them.
+_STANDARD_BASELINES = {"default": lambda: Design(), "default_covering": lambda: Design(init="covering")}
 
 # Which check a held-out protocol entry in the wrong place counts against.
 _PLACEMENT_CHECK = {
@@ -703,8 +724,10 @@ def _flaw(entry: Mapping) -> str | None:
     for name, expected in _FIELDS.get(kind, {}).items():
         if not isinstance(body.get(name), expected) or isinstance(body.get(name), bool):
             return f"field {name!r} is missing or of the wrong type"
-    if kind in _FIELDS and body["rounds"] < 1:
-        return "rounds must be positive"
+    if kind in _FIELDS and not 1 <= body["rounds"] <= _MAX_ROUNDS:
+        return f"rounds must be between 1 and {_MAX_ROUNDS}"
+    if kind == "eval" and len(body["scenarios"]) > _MAX_WORLDS:
+        return f"an evaluation may use at most {_MAX_WORLDS} worlds"
     if kind == "eval":
         cells = (body["scenarios"], body["values"], body["board_heads"])
         if not body["scenarios"] or len({len(cell) for cell in cells}) != 1:
@@ -720,8 +743,8 @@ def _flaw(entry: Mapping) -> str | None:
             and isinstance(commitment.get("round"), int) and not isinstance(commitment.get("round"), bool)
         ):
             return "a beacon commitment must name a source and a round"
-        if body["n_worlds"] < 1:
-            return "n_worlds must be positive"
+        if not 1 <= body["n_worlds"] <= _MAX_WORLDS:
+            return f"n_worlds must be between 1 and {_MAX_WORLDS}"
         if not all(isinstance(h, str) for h in body["baselines"].values()) or not all(isinstance(a, str) for a in body["ablations"]):
             return "baselines must map names to design hashes and ablations must be names"
     return None
@@ -773,6 +796,13 @@ def _check_commitment(rnd: _Round, last: bool, selections: Sequence[Mapping], ve
             f"commits to design {protocol['design_hash']}, but the latest selection (entry {earlier[-1]['index']}) "
             f"chose {earlier[-1]['body'].get('chosen')}", at,
         )
+    for name, make in _STANDARD_BASELINES.items():
+        if name in protocol["baselines"] and protocol["baselines"][name] != make().hash():
+            verdict.fail("preregistration", f"registers baseline {name!r} as design {protocol['baselines'][name]}, "
+                                            f"but that name stands for design {make().hash()}", at)
+    left_out = sorted(set(ABLATIONS) - set(protocol["ablations"]))
+    if left_out:
+        verdict.warnings.append(f"the pre-registration at entry {at} leaves out the ablations {', '.join(left_out)}")
     if rnd.report is None and not last:
         verdict.fail(
             "preregistration",
@@ -824,6 +854,17 @@ def _check_reveal(number: int, rnd: _Round, verdict: _Verdict) -> tuple[bool, st
         verdict.fail("beacon", "does not record hex randomness", where)
         return False, None
     return True, revealed["randomness"]
+
+
+def _round_time(source: str, number: int) -> str:
+    """When a beacon round was produced, as far as this code knows the beacon's schedule."""
+    try:
+        from .beacon import DrandBeacon
+        if source == "drand" and hasattr(DrandBeacon, "round_time"):
+            return DrandBeacon.round_time(number)
+    except Exception:  # noqa: BLE001
+        pass
+    return "time unknown to this verifier"
 
 
 def _check_public_randomness(
@@ -1073,8 +1114,22 @@ def _check_submission(
         differences = _differences(stated, {name: claims[name] for name in stated})
         if differences:
             verdict.fail("submission", "does not state the recomputed held-out numbers: " + _briefly(differences))
+    claimed_beacon = submission.get("beacon")
+    committed = rounds[-1].prereg["body"].get("beacon")
+    if "beacon" in submission and (claimed_beacon or None) != ((committed or {}).get("source")):
+        verdict.fail("submission", f"says the beacon was {claimed_beacon!r}, but the last pre-registration committed to "
+                                   f"{(committed or {}).get('source')!r}")
+    if "anchor" in submission:
+        recorded = rounds[-1].worlds["body"].get("anchor") if rounds[-1].worlds is not None else None
+        if (submission["anchor"] is None) != (recorded is None):
+            verdict.fail("submission", "states an anchor the notebook does not record, or omits one it records")
+    if "notebook_entries" in submission and submission["notebook_entries"] != len(nb.entries):
+        verdict.fail("submission", f"says the notebook has {submission['notebook_entries']} entries; it has {len(nb.entries)}")
     records = submission.get("refinement_rounds")
     if records is None:
+        if len(rounds) > 1:
+            verdict.fail("submission", f"the notebook holds {len(rounds)} pre-registered rounds, but the submission does "
+                                       "not record them (refinement_rounds)")
         return
     if not isinstance(records, list) or len(records) != len(rounds):
         verdict.fail("submission", f"refinement_rounds must record each of the {len(rounds)} pre-registered rounds")
@@ -1083,6 +1138,8 @@ def _check_submission(
         if report is None:
             verdict.fail("submission", f"round {number} has no held-out report that can be recomputed")
             continue
+        if isinstance(record, dict) and "design" in record and _design_hash(record["design"]) != rnd.prereg["body"]["design_hash"]:
+            verdict.fail("submission", f"refinement_rounds[{number - 1}] records a design other than the one pre-registered")
         expected = {
             "round": number, "design_hash": rnd.prereg["body"]["design_hash"],
             "claimed_value": report["value_mean"], "claimed_value_ci95": report["value_ci95"],
@@ -1091,6 +1148,44 @@ def _check_submission(
         differences = _differences(stated, expected, f"refinement_rounds[{number - 1}]")
         if differences:
             verdict.fail("submission", _briefly(differences))
+
+
+def _check_selections(entries: Sequence[Mapping], verdict: _Verdict) -> None:
+    """Each selection must pick the best of its candidates, by the validation entries written since the last one."""
+    pending: dict[str, float] = {}
+    for entry in entries:
+        body = entry["body"]
+        if entry["kind"] == "eval" and body.get("stage") == "validation":
+            pending[body["design_hash"]] = body["mean"]
+        elif entry["kind"] == "selection":
+            verdict.ran("selection")
+            candidates = body.get("candidates")
+            if not isinstance(candidates, list) or not candidates or not all(isinstance(c, dict) for c in candidates):
+                verdict.fail("selection", "lists no candidates", entry["index"])
+            else:
+                means = {}
+                for c in candidates:
+                    h = c.get("design_hash")
+                    if h not in pending or not _close(c.get("validation_mean", float("nan")) if _is_number(c.get("validation_mean")) else float("nan"), pending[h]):
+                        verdict.fail("selection", f"candidate {h} has no validation entry with the stated mean", entry["index"])
+                    else:
+                        means[h] = pending[h]
+                if means and len(means) == len(candidates):
+                    best = max(means.values())
+                    if body.get("chosen") not in means or means[body["chosen"]] < best - _TOLERANCE:
+                        verdict.fail("selection", f"chose {body.get('chosen')}, not the candidate with the best validation mean",
+                                     entry["index"])
+            pending = {}
+
+
+def _check_order(rnd: _Round, verdict: _Verdict) -> None:
+    verdict.ran("order")
+    worlds_at = rnd.worlds["index"] if rnd.worlds is not None else None
+    for entry in rnd.evals:
+        if worlds_at is None or entry["index"] < worlds_at:
+            verdict.fail("order", "a held-out evaluation precedes the entry that records its worlds", entry["index"])
+    if rnd.report is not None and rnd.evals and rnd.report["index"] < max(e["index"] for e in rnd.evals):
+        verdict.fail("order", "the held-out report precedes evaluations it summarises", rnd.report["index"])
 
 
 def _rerun(job: Mapping) -> dict:
@@ -1121,17 +1216,24 @@ def _check_reruns(
 
     runnable = [entry for entry in evals if _design_hash(entry["body"]["design"]) is not None]
     chosen = {rnd.evals[0]["index"] for rnd in rounds if rnd.evals}
-    others = [entry for entry in runnable if entry["index"] not in chosen]
+    # The submission compares the claimed design with every arm of the last round, so all of them are re-run.
+    arms = {entry["index"] for entry in rounds[-1].evals} - chosen if rounds else set()
+    others = [entry for entry in runnable if entry["index"] not in chosen | arms]
     cells = [
-        ("rerun_chosen", entry, k)
-        for entry in runnable if entry["index"] in chosen for k in range(len(entry["body"]["scenarios"]))
+        ("rerun_chosen" if entry["index"] in chosen else "rerun_arms", entry, k)
+        for entry in runnable if entry["index"] in chosen | arms for k in range(len(entry["body"]["scenarios"]))
     ]
     if sample is None:
         cells += [("rerun_sample", entry, k) for entry in others for k in range(len(entry["body"]["scenarios"]))]
     else:
+        # Sampled over distinct experiments, so copies of one entry cannot dilute the sample.
+        distinct: dict[str, list[tuple[Mapping, int]]] = {}
+        for entry in others:
+            for k in range(len(entry["body"]["scenarios"])):
+                distinct.setdefault(canonical_json(job(entry["body"], k)), []).append((entry, k))
         rng = make_rng("verify", seed)
-        for entry in rng.sample(others, min(max(sample, 0), len(others))):
-            cells.append(("rerun_sample", entry, rng.randrange(len(entry["body"]["scenarios"]))))
+        for key in rng.sample(sorted(distinct), min(max(sample, 0), len(distinct))):
+            cells += [("rerun_sample", entry, k) for entry, k in distinct[key]]
 
     jobs: dict[str, dict] = {}
     for _, entry, k in cells:
@@ -1149,21 +1251,22 @@ def _check_reruns(
                          entry["index"])
         elif result["board_head"] != body["board_heads"][k]:
             verdict.fail(check, f"world {k}: the value matches but the simulated history differs", entry["index"])
-        elif check == "rerun_chosen":
+        else:
             reproduced.setdefault(entry["index"], []).append(result)
     for entry in runnable:
         runs = reproduced.get(entry["index"], [])
         if len(runs) == len(entry["body"]["scenarios"]):
             differences = _differences(entry["body"]["metrics_mean"], _mean_metrics(runs))
             if differences:
-                verdict.fail("rerun_chosen", "metrics_mean does not follow from the re-run worlds: " + _briefly(differences),
+                check = "rerun_chosen" if entry["index"] in chosen else "rerun_arms" if entry["index"] in arms else "rerun_sample"
+                verdict.fail(check, "metrics_mean does not follow from the re-run worlds: " + _briefly(differences),
                              entry["index"])
     return len(jobs), [[entry["index"], k] for _, entry, k in cells]
 
 
 def _verify(
     path: str, sample: int | None, seed: int | str | None, workers: int, submission: Mapping | None,
-    check_beacon: bool, beacons: Mapping[str, Beacon] | None, anchored: Sequence[str],
+    check_beacon: bool, beacons: Mapping[str, Beacon] | None, anchored: Sequence[str], confirmed_timing: bool = False,
 ) -> dict:
     """Run every check of ``Designer.verify_notebook`` and assemble the result."""
     verdict = _Verdict()
@@ -1180,6 +1283,14 @@ def _verify(
         verdict.fail("chain", str(exc))
         return verdict.result(summary)
     verdict.ran("chain")
+    if not nb.entries:
+        verdict.fail("chain", "the notebook is empty")
+        return verdict.result(summary)
+    unknown = sorted({e["kind"] for e in nb.entries} - _KNOWN_KINDS)
+    if unknown:
+        verdict.warnings.append(f"entries of kinds this verifier does not know were ignored: {', '.join(unknown)}")
+    if nb.entries[0]["kind"] != "header":
+        verdict.fail("order", "the first entry is not the header", 1)
     entries = _readable(nb, verdict)
     evals = [entry for entry in entries if entry["kind"] == "eval"]
     selections = [entry for entry in entries if entry["kind"] == "selection"]
@@ -1187,15 +1298,49 @@ def _verify(
     for entry in orphans:
         verdict.fail(_PLACEMENT_CHECK[entry["kind"]], "no well-formed pre-registration precedes it", entry["index"])
     beacons = public_beacons() if beacons is None else beacons
+    _check_selections(entries, verdict)
     reports = []
+    used: dict[str, int] = {}  # the latest beacon round committed so far, by source
     for number, rnd in enumerate(rounds, start=1):
         _check_commitment(rnd, number == len(rounds), selections, verdict)
+        _check_order(rnd, verdict)
+        commitment = rnd.prereg["body"].get("beacon")
+        if commitment is not None:
+            source, committed = commitment["source"], commitment["round"]
+            if source in used and committed <= used[source]:
+                verdict.fail("beacon", f"commits to {source} round {committed}, which is not later than round {used[source]} "
+                                       "that an earlier pre-registration already used: its randomness was known",
+                             rnd.prereg["index"])
+            used[source] = max(committed, used.get(source, committed))
+            if anchored and not confirmed_timing:
+                verdict.warnings.append(
+                    f"round {number}: the published copy must have been public before {source} round {committed} was "
+                    f"produced ({_round_time(source, committed)}); compare the copy's publication time with that and pass "
+                    "--confirmed-timing"
+                )
+        if number > 1:
+            previous = rounds[number - 2]
+            between = [e for e in nb.entries
+                       if (previous.report or previous.prereg)["index"] < e["index"] < rnd.prereg["index"] and e["kind"] == "round"]
+            if not between:
+                verdict.fail("preregistration", "a later round must be opened by a 'round' entry that records what earlier "
+                                                "rounds informed it and which worlds are spent", rnd.prereg["index"])
         derivable, randomness = _check_reveal(number, rnd, verdict)
         if randomness is not None:
             _check_public_randomness(number, rnd, randomness, verdict, beacons, check_beacon)
         worlds = _check_worlds(rnd, derivable, randomness, verdict)
         reports.append(_check_heldout(rnd, worlds, evals, verdict))
     _check_anchor(nb, rounds, anchored, verdict)
+    if not rounds or reports[-1] is None:
+        verdict.warnings.append("the notebook holds no evaluated pre-registration, so it supports no claim")
+    if len(rounds) > 1:
+        values = ", ".join(f"round {k}: {r['value_mean']:.4f}" if r else f"round {k}: no report" for k, r in enumerate(reports, 1))
+        verdict.warnings.append(
+            f"the claim is the last of {len(rounds)} pre-registered rounds, each judged after the earlier ones were seen "
+            f"({values}); earlier rounds' worlds are spent"
+        )
+    if rounds and rounds[-1].prereg["body"]["n_worlds"] < 2:
+        verdict.warnings.append("the claim rests on a single held-out world: there is no interval")
     if submission is not None:
         _check_submission(submission, nb, rounds, reports, verdict)
     recorded_code = nb.entries[0]["body"].get("evaluator_code") if nb.entries else None
@@ -1203,7 +1348,8 @@ def _verify(
         verdict.warnings.append(
             "the grading code differs from the version this notebook was produced with, so re-runs may not reproduce"
         )
-    summary.update(entries=len(nb.entries), chain_ok=True, evaluator_code_recorded=recorded_code)
+    summary.update(entries=len(nb.entries), chain_ok=True, evaluator_code_recorded=recorded_code,
+                   round_values=[r["value_mean"] if r else None for r in reports])
     summary["preregistrations"] = [
         {
             "entry": rnd.prereg["index"], "design_hash": rnd.prereg["body"]["design_hash"],

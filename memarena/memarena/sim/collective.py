@@ -119,7 +119,7 @@ def audit_record(board: Any, family: CriteriaFamily, cache: dict | None = None, 
         verdict = cache.get(("exam",) + key)
         if verdict is None:
             verdict = settle(board, family, *key, index=index, clock_author=clock_author)
-            if not verdict.pending:
+            if verdict.final_seq is not None:  # only a verdict fixed at a position on the chain is final
                 cache[("exam",) + key] = verdict
         verdicts[key] = verdict
         if verdict.ok:
