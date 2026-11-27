@@ -338,6 +338,14 @@ def main() -> int:
         w("### Verification\n")
         w(f"The package's own check re-ran {v['rerun']} simulations: {'all reproduced' if v['ok'] else 'PROBLEMS: ' + str(v['problems'])}. "
           f"Check it yourself with `{sub.get('reproduce', 'python scripts/verify_contest.py ' + args.contest)}`.\n")
+        external = os.path.join(args.contest, "VERIFY.txt")
+        if os.path.exists(external):
+            text = open(external, encoding="utf-8").read()
+            passed = [line.split()[0] for line in text.splitlines() if " passed " in line]
+            w(f"An external verification (`{external}`) fetched each committed round from drand and compared the notebook "
+              f"with the copies pushed at each pre-registration: {len(passed)} checks passed"
+              + (", the anchor among them" if "anchor" in passed else "") + ". Its output and the commands to repeat it "
+              "are in that file and in docs/HANDOFF.md.\n")
         w("| Check | Status |")
         w("|---|---|")
         for name, check in v.get("checks", {}).items():
@@ -386,8 +394,11 @@ def main() -> int:
         base_design = replace(chosen, init=start)
         arms[f"{start}: no striving"] = replace(base_design, policy=replace(base_design.policy, trials_per_round=0))
         arms[f"{start}: striving as designed"] = base_design
-        arms[f"{start}: striving towards peers' whole standards"] = replace(
-            base_design, policy=replace(base_design.policy, peer_scope="full", focused_dev=False))
+        arms[f"{start}: earlier rule, own specialties"] = replace(
+            base_design, policy=replace(base_design.policy, strive_on="specialties", proposals="stock"))
+        arms[f"{start}: first rule, peers' whole standards"] = replace(
+            base_design, policy=replace(base_design.policy, strive_on="specialties", proposals="stock",
+                                        peer_scope="full", focused_dev=False))
     out = run_jobs(society_job, [{"design": d_.to_dict(), "arm": a, "world": x} for a, d_ in arms.items() for x in worlds], args.workers)
     w("## 6. Does striving help?\n")
     w(f"The chosen design's policy with the starting designs and the striving rule varied, in {len(worlds)} fresh worlds "
