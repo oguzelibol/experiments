@@ -55,7 +55,7 @@ class Notebook:
                     try:
                         self.entries.append(json.loads(line, object_pairs_hook=_no_duplicates))
                     except (ValueError, RecursionError) as exc:
-                        raise ValueError(f"notebook failed verification: line {number} is not JSON") from exc
+                        raise ValueError(f"notebook failed verification: line {number} is not JSON ({exc})") from exc
             ok, why = self.verify()
             if not ok:
                 raise ValueError(f"notebook failed verification: {why}")
