@@ -1175,18 +1175,18 @@ _GRADED_SCHEMA = {
 }
 
 
-def _said_yes(reply: str) -> bool:
+def _said_yes(reply: str) -> bool | None:
     """Read a judge's reply to "Answer yes or no only."
 
     Rule: the first word decides.  LongMemEval's script counts any reply that
     contains the letters "yes", which reads "No. The response says it happened
-    yesterday." as a yes.  Only when the reply opens with neither word is it
-    searched for a whole-word "yes".
+    yesterday." as a yes.  A reply that opens with neither word is not a
+    verdict (``None``), and the caller records a judge error.
     """
     words = re.findall(r"[a-z]+", clean(reply).lower())
     if words and words[0] in ("yes", "no"):
         return words[0] == "yes"
-    return "yes" in words
+    return None
 
 
 def _structured_prompt(question: str, key: AnswerKey, response: str) -> str:
@@ -1251,7 +1251,10 @@ class LLMJudge:
             )
             if result.status != "ok":
                 return JudgeVerdict(0.0, status="error", raw=f"{result.status}: {result.text[:200]}")
-            return JudgeVerdict(1.0 if _said_yes(result.text) else 0.0, raw=result.text.strip())
+            said = _said_yes(result.text)
+            if said is None:  # neither yes nor no first: not a verdict
+                return JudgeVerdict(0.0, status="error", raw=result.text[:200])
+            return JudgeVerdict(1.0 if said else 0.0, raw=result.text.strip())
         graded = self.mode == "graded"
         result = self.llm.complete(
             system=_MODE_SYSTEM[self.mode],
@@ -1280,5 +1283,7 @@ class LLMJudge:
             return JudgeVerdict(0.0, status="error", raw=verdicts[0].raw)
         mean = sum(v.score for v in ok) / len(ok)
         if self.mode != "graded":
+            if mean == 0.5:  # the votes that came back are split evenly: no verdict
+                return JudgeVerdict(0.0, status="error", raw=f"tied votes ({len(ok)}); " + ok[0].raw[:200])
             mean = 1.0 if mean > 0.5 else 0.0
         return JudgeVerdict(mean, raw=f"{len(ok)} vote(s); " + ok[0].raw[:200])

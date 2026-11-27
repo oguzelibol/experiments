@@ -81,7 +81,13 @@ class ItemGrade:
     judge_errors: tuple[str, ...] = ()
 
     def score(self, criterion: Criterion) -> tuple[bool, float]:
-        """(included, score) of this item under ``criterion``."""
+        """(included, score) of this item under ``criterion``.
+
+        An item whose judge failed under this criterion's scorer is left out, not scored wrong: a
+        failed call says nothing about the answer.  Reports count such items (``n_judge_errors``).
+        """
+        if criterion.scorer in self.judge_errors:
+            return False, 0.0
         if self.is_abstention:
             if criterion.abstention == "exclude":
                 return False, 0.0
@@ -101,6 +107,7 @@ class ItemGrade:
             int(self.abstained),
             {k: self.base[k] for k in sorted(self.base)},
             {k: self.literal[k] for k in sorted(self.literal)},
+            sorted(self.judge_errors),
         ]
 
 

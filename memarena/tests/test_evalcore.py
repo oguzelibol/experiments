@@ -128,16 +128,35 @@ def test_official_prompt_judge_reads_the_first_word_of_the_reply():
     """LongMemEval's script counts any reply containing "yes"; "yesterday" contains it."""
     key = AnswerKey("p", "single-session-user", "Lisbon")
 
+    def judged(reply: str):
+        return LLMJudge(MockLLM(lambda request: reply), mode="lenient").judge("Where do I live?", key, "Lisbon")
+
     def verdict(reply: str) -> float:
-        return LLMJudge(MockLLM(lambda request: reply), mode="lenient").judge("Where do I live?", key, "Lisbon").score
+        return judged(reply).score
 
     assert verdict("No. The response says it happened yesterday.") == 0.0
     assert verdict("Yes.") == 1.0 and verdict("yes") == 1.0 and verdict("**Yes** - it matches.") == 1.0
     assert verdict("No") == 0.0 and verdict("no, although yes would be defensible") == 0.0
-    # neither word first: only then is the reply searched, and only for the whole word
-    assert verdict("The answer is yes.") == 1.0
-    assert verdict("Unclear; the response mentions yesterday.") == 0.0
-    assert verdict("") == 0.0
+    # neither word first: not a verdict, so the item is unjudged rather than scored either way
+    for reply in ("The answer is yes.", "Unclear; the response mentions yesterday.", ""):
+        assert judged(reply).status == "error"
+
+
+def test_an_item_the_judge_could_not_judge_is_left_out_not_scored_wrong():
+    from memarena.benchmark.schema import Answer, Instance, Probe
+    from memarena.evalcore.criteria import CriteriaFamily
+    from memarena.evalcore.grader import Grader
+
+    replies = iter(["Yes.", "I am not sure what to say."])
+    judge = LLMJudge(MockLLM(lambda request: next(replies)), mode="lenient")
+    instances = [Instance(Probe(f"p{i}", "Where do I live?", "2023-06-01", f"h{i}", ()), AnswerKey(f"p{i}", "single-session-user", "Lisbon"))
+                 for i in range(2)]
+    from memarena.evalcore.grader import default_judges
+    report = Grader(CriteriaFamily.default(), {**default_judges(), "judge_lenient": judge}).grade({i.probe_id: Answer("Lisbon") for i in instances}, instances)
+    assert report.n_judge_errors == 1
+    assert report.score("judge_lenient|detect|micro") == 1.0  # one judged item, right; the other is left out
+    tied = LLMJudge(MockLLM(lambda request, k=iter(["Yes.", "No."]): next(k)), mode="lenient", votes=2)
+    assert tied.judge("Where do I live?", instances[0].key, "Lisbon").status == "error"
 
 
 def test_aggregation_micro_vs_macro():

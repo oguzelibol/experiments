@@ -158,6 +158,9 @@ def main() -> int:
     }
     print(f"\n{bench.name}: {report.n_items} questions, system {system.name}")
     print(f"not answered: {report.n_not_answered}   truncated: {report.n_truncated}   judge errors: {report.n_judge_errors}")
+    if report.n_judge_errors:
+        print(f"WARNING: {report.n_judge_errors} item(s) could not be judged under at least one judge; they are left out "
+              "of that judge's scores, not counted as wrong. Re-run to fill them in (replies already made are replayed).")
     for name, t in transcripts.items():
         print(f"{name}: {t.live} replies from calls made now, {t.replayed} read from the transcript file")
     if report.n_not_answered:
