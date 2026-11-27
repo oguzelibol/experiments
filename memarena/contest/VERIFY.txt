@@ -1,0 +1,25 @@
+exit 0
+chain              passed   the notebook is an unbroken hash chain
+entries            passed   eval and pre-registration entries are well formed; an eval entry's design hashes to its design_hash and its mean is the mean of its values
+preregistration    passed   each pre-registered design hashes to its design_hash, is the design the latest selection chose, and was evaluated
+beacon             passed   a committed beacon round is revealed by the entry that follows the pre-registration
+beacon_randomness  passed   the recorded randomness is what the public beacon published for the committed round
+anchor             passed   the notebook extends the copies published at pre-registration
+heldout_worlds     passed   held-out worlds follow from the hash of the pre-registration entry and the beacon randomness
+heldout_isolation  passed   held-out evaluations use exactly the pre-registered worlds, and no earlier entry uses them
+heldout_arms       passed   the held-out entries are the pre-registered arms, the pre-registered design first
+heldout_report     passed   each held-out report recomputes from its eval entries
+submission         passed   the submission states the last round's design and the recomputed held-out numbers
+rerun_chosen       passed   every held-out world of each chosen design reproduces: value, metrics and simulated history
+rerun_arms         passed   every world of every arm of the last round reproduces: value, metrics and simulated history
+rerun_sample       passed   one world from each of a random sample of the other experiments reproduces
+selection          passed   each selection chose the best of its candidates, by the validation entries that precede it
+order              passed   within a round: pre-registration, beacon, worlds, the arms' evaluations, then the report
+pre-registration at entry 85: design f1792d3b34df2eca; beacon drand round 6677107; reported as published: {"commit": "cf753dc5d54bc1022a11289344d0247247960e19", "kind": "git", "path": "memarena/contest/notebook.jsonl"}
+pre-registration at entry 112: design 5a0aa65c405dde97; beacon drand round 6677151; reported as published: {"commit": "1eba243ea300bb74698b2547de3e5085b84f2311", "kind": "git", "path": "memarena/contest/notebook.jsonl"}
+WARNING: the claim is the last of 2 pre-registered rounds, each judged after the earlier ones were seen (round 1: 0.7976, round 2: 0.7961); earlier rounds' worlds are spent
+re-ran 252 simulations covering 257 recorded world results
+held-out value by pre-registered round: 0.7976, 0.7961
+sample seed e6e50d49397cce112046c0c6e93950ba (repeat this verification with --seed)
+
+[exited with code 0]
