@@ -133,6 +133,10 @@ def conflicting_numbers(pred: str, value: float, tolerance: float = 0.0) -> bool
 
 def list_recall(pred: str, items: Sequence[str]) -> float:
     """Fraction of required list items present in the response (order free)."""
+    # a key is data: a list field that is not a list of strings names no items
+    if isinstance(items, (str, bytes)) or not isinstance(items, Sequence):
+        return 0.0
+    items = [it for it in items if isinstance(it, str)]
     if not items:
         return 0.0
     p = tokens(pred)

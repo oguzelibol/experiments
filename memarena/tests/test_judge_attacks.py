@@ -174,6 +174,13 @@ def blind_vocabulary(probe) -> str:
     return " ".join(pool(question)).lower()
 
 
+def statement_of_preference(probe) -> str:
+    """The user's own sentence about the thing a preference question asks about, lower-cased."""
+    about = re.search(r"(?:when it comes to|preference for) (.*)\?", probe.question)
+    turns = [t.content for s in probe.sessions for t in s.turns]
+    return next((t.lower() for t in turns if about and about.group(1) in t), "")
+
+
 def candidates_in_order(probe) -> str:
     """Opens the history but decides nothing: every candidate value in it, in order of last mention."""
     question = probe.question
@@ -191,7 +198,13 @@ def candidates_in_order(probe) -> str:
         return ", ".join(sorted((first, second), key=first_mention))
     about = re.search(r"(?:when it comes to|preference for) (.*)\?", question)
     if about:
-        return next((t.lower() for t in turns if about.group(1) in t), "")
+        # Both options of the preference, in the order the user named them, without the words that
+        # choose between them.  (This used to paste the user's whole sentence.  "for tea, i prefer
+        # oolong to chamomile" states the preference, and a judge that reads "over" / "to" / "than"
+        # now accepts it as the answer it is: see test_a_pasted_statement_of_the_preference_is_an_answer.)
+        statement = statement_of_preference(probe)
+        options = next(((x, y) for category, x, y in syn.PREFERENCES if category == about.group(1)), ())
+        return ", ".join(sorted((o for o in options if o in statement), key=statement.find))
     last = {v: max((i for i, t in enumerate(turns) if v.lower() in t.lower()), default=None) for v in pool(question)}
     return ", ".join(v.lower() for v, i in sorted(((v, i) for v, i in last.items() if i is not None), key=lambda x: x[1]))
 
@@ -279,6 +292,21 @@ def test_listing_the_candidates_found_in_the_history_earns_at_most_half_of_an_ho
     assert lenient <= world.honest[0] / 2 and strict <= world.honest[1] / 2
 
 
+def test_a_pasted_statement_of_the_preference_is_an_answer(world):
+    """Before: 0 of 21.  The user's sentence "I prefer X over Y" says which option is preferred.
+
+    The judges used to reject it because the other option is named.  They now
+    read what each option is attached to, so the sentence is the correct answer
+    wherever it exists, and naming the two options without it is still not one.
+    """
+    asked = [i for i in world.instances if asked_about(i.probe.question) == "preference" and not i.key.is_abstention]
+    assert len(asked) >= 20
+    for inst in asked:
+        statement = statement_of_preference(inst.probe)
+        assert verdicts(inst.probe.question, inst.key, statement) == (1.0, 1.0), statement
+        assert verdicts(inst.probe.question, inst.key, candidates_in_order(inst.probe)) == (0.0, 0.0)
+
+
 def test_a_decline_in_front_of_the_candidates_adds_no_more_than_plain_declines(world):
     """Before: 0.838 lenient, the list's score plus every unanswerable question.
 
@@ -360,7 +388,13 @@ def test_an_honest_count_that_lists_a_title_with_a_number_word_is_accepted():
 def test_a_named_wrong_alternative_is_fatal_and_a_superseded_one_must_come_first():
     assert verdicts(CITY_Q, CITY, "You live in Lisbon.") == (1.0, 1.0)
     assert verdicts(CITY_Q, CITY, "Lisbon or Porto.") == (0.0, 0.0)
-    assert verdicts(CITY_Q, CITY, "It is Lisbon, not Porto.") == (0.0, 0.0)
+    assert verdicts(CITY_Q, CITY, "Lisbon and Porto.") == (0.0, 0.0)
+    assert verdicts(CITY_Q, CITY, "Lisbon. Porto.") == (0.0, 0.0)
+    # Changed: this was (0.0, 0.0), "an alternative named in order to dismiss it is still named".  A
+    # dismissed alternative is not asserted, so the response commits to Lisbon alone; dismissing the
+    # right value in favour of a wrong one is still wrong.
+    assert verdicts(CITY_Q, CITY, "It is Lisbon, not Porto.") == (1.0, 1.0)
+    assert verdicts(CITY_Q, CITY, "It is Porto, not Lisbon.") == (0.0, 0.0)
     assert verdicts(CAR_Q, CAR, "You used to drive a Honda Civic, but you now drive a Mazda CX-5.") == (1.0, 1.0)
     assert verdicts(CAR_Q, CAR, "honda civic, mazda cx-5") == (1.0, 1.0)
     assert verdicts(CAR_Q, CAR, "mazda cx-5, honda civic") == (0.0, 0.0)  # the old value is the last word
@@ -451,15 +485,22 @@ PHRASINGS = {
     "The answer is {gold}.": (0.95, 0.95),
     "Based on what you told me, it's {gold}.": (0.95, 0.95),
     "{gold}, I think.": (0.95, None),  # hedged
+    # These five were the known false rejections of the first round (each was xfail); the rules that
+    # read a phrase by what it is attached to accept them.
+    "{question} {gold}": (0.95, 0.95),  # the question restated, then the answer
+    "{number} days (roughly two weeks)": (0.95, 0.95),  # the number attached to the unit asked for
+    "{gold}; before that it was {stale}.": (0.95, 0.95),  # the old value marked as old
+    "{gold} over {distractor}.": (0.95, 0.95),  # the other side of a preference, dismissed
+    "It is {gold}, not {wrong}.": (0.95, 0.95),  # an alternative named in order to dismiss it
 }
+# How many items a phrasing must apply to; the ones that need an update, a preference or a day count
+# apply to fewer.
+APPLICABLE = {"{number} days (roughly two weeks)": 20, "{gold}; before that it was {stale}.": 20, "{gold} over {distractor}.": 20}
 # Answers a careful grader would accept and these judges do not: what the rules cost.  Each is
 # expected to fail the 95% bar; if a later change makes one pass, move it up.
 KNOWN_FALSE_REJECTIONS = {
-    "{question} {gold}": "the question restated before the answer reads as an echo",
-    "{number} days (roughly two weeks)": "the last number in the response is taken as the answer",
-    "{gold}; before that it was {stale}.": "a superseded value mentioned after the current one",
-    "{gold} over {distractor}.": "the other side of a preference is a wrong alternative",
-    "It is {gold}, not {wrong}.": "an alternative named in order to dismiss it is still named",
+    "{gold}. {stale} was a while ago.": "a superseded value named after the current one counts as the last word unless "
+                                        "one of the phrases the rule knows marks it as old; 'a while ago' is not one",
 }
 
 
@@ -494,7 +535,7 @@ def acceptance(world: World, template: str) -> tuple[float, float, int]:
 def test_honest_answers_are_accepted_in_ordinary_phrasings(world, template):
     lenient_floor, strict_floor = PHRASINGS[template]
     lenient, strict, applicable = acceptance(world, template)
-    assert applicable > 100
+    assert applicable > APPLICABLE.get(template, 100)
     assert lenient >= lenient_floor
     assert strict_floor is None or strict >= strict_floor
 
@@ -504,8 +545,8 @@ def test_honest_answers_are_accepted_in_ordinary_phrasings(world, template):
     for template, reason in KNOWN_FALSE_REJECTIONS.items()
 ])
 def test_known_false_rejections(world, template):
-    lenient, _strict, applicable = acceptance(world, template)
-    assert applicable > 0 and lenient >= 0.95
+    lenient, strict, applicable = acceptance(world, template)
+    assert applicable > 0 and lenient >= 0.95 and strict >= 0.95
 
 
 def test_the_reference_answer_is_accepted_in_each_answer_style_of_the_offline_system(world):
@@ -525,7 +566,7 @@ EXAM_BEFORE_REVIEW = "b3bde842eecba5d1"
 
 
 def test_the_exam_gained_a_review_part_and_lost_nothing():
-    earlier = [c for c in JUDGE_EXAM if c["split"] != "review"]
+    earlier = [c for c in JUDGE_EXAM if c["split"] in ("dev", "fresh")]  # changed: the exam has since gained "review2" too
     assert [c["split"] for c in earlier] == ["dev"] * 52 + ["fresh"] * 16
     assert digest([
         [c["split"], c["tag"], c["question"], c["response"], c["official"], c["strict"], c["key"].question_type,

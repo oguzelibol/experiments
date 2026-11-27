@@ -1133,3 +1133,43 @@ def test_the_remembered_grade_depends_on_every_answer_and_on_the_standard():
     assert protocol._grade(other, paper, right, "salt").receipt["evaluator"] != a.receipt["evaluator"]
     # answers to questions that are not on the paper are not read, so they do not make a different sheet
     assert protocol._grade(module, paper, dict(right, stray=Answer("x")), "salt") is a
+
+
+def test_striving_on_leads_keeps_features_and_never_lowers_a_lead_ability():
+    from memarena.actors.unit import mutate_settings
+    rng = random.Random(3)
+    cfg = MemoryConfig(features=frozenset(list(FEATURES)[:4]))
+    for _ in range(200):
+        assert mutate_settings(cfg, rng).features == cfg.features
+    with pytest.raises(ValueError):
+        UnitPolicy(strive_on="everything")
+    with pytest.raises(ValueError):
+        UnitPolicy(exam_floor=1.0)
+    scenario, specs = small_world(seed=6, rounds=5)
+    sim = Simulation(scenario, specs)
+    sim.run()
+    for unit in sim.units.values():
+        assert unit.policy.strive_on == "lead"
+        for event in unit.log:
+            if event.get("event") == "adopt":
+                assert event["lead"] and set(event["to"]["features"]) == set(event["from"]["features"])
+        # every exam carries every question ability at floor level
+        assert all(unit.eval.standard.capability_weights.get(c, 0.0) > 0 for c in ("multi-session", "temporal-reasoning"))
+
+
+def test_the_society_is_served_the_design_its_evidence_is_about():
+    scenario, specs = small_world(seed=7, rounds=2)
+    sim = Simulation(scenario, specs)
+    sim.run()
+    unit = next(iter(sim.units.values()))
+    published = unit.served_cfg
+    unit.memory_cfg = MemoryConfig(features=frozenset())  # changed after its last profile
+    assert sim.truth(unit, served=True) is sim.truth(unit, served=True)
+    assert unit._factory(published).config_hash() != unit._factory(unit.memory_cfg).config_hash()
+    assert sim.truth(unit, served=True)["answers"] == sim._truth[unit._factory(published).config_hash()]["answers"]
+
+
+def test_an_unmeasured_unit_is_not_chosen_over_a_measured_good_one():
+    from memarena.sim.collective import _lowest
+    cons = {"temporal-reasoning": {"a": (0.9, 30.0), "b": (0.2, 30.0)}}
+    assert _lowest(cons, "temporal-reasoning", 0.5) == 0.2 and _lowest(cons, "multi-session", 0.5) == 0.5

@@ -275,6 +275,10 @@ def run_audit(
         "decline_plus_vocabulary": lambda i: ABSTAIN_TEXT + " " + " ".join(vocabulary[i.probe_id]),
         "number_run": lambda i: "2, 3, 4",
         "negated_vocabulary": lambda i: "Not " + (vocabulary[i.probe_id] or [""])[0],
+        # an invented answer and a decline in one response, either way round: one template that would
+        # be paid as an answer where the answer happens to be right and as a decline everywhere else
+        "answer_then_decline": lambda i: (vocabulary[i.probe_id] or other_answers[:1] or ["42"])[0] + ". I don't know.",
+        "decline_then_answer": lambda i: ABSTAIN_TEXT + " " + (vocabulary[i.probe_id] or other_answers[:1] or ["42"])[0] + ".",
     })
     # The floor of such a response is not zero.  Read by a sound judge it amounts to at most one
     # committed guess (its last candidate, its last number), and a guess is sometimes right:
@@ -285,6 +289,12 @@ def run_audit(
         # with nothing to recite, the response is a plain decline and earns what a decline earns
         "decline_plus_vocabulary": lambda i: (vocabulary[i.probe_id] or [ABSTAIN_TEXT])[-1],
         "number_run": lambda i: "4",
+        # The decline must add nothing to the invented answer.  The answer is held against itself
+        # in hedged form: under the lenient judge that earns what the answer earns alone (and nothing
+        # on an unanswerable question), under the strict judge nothing at all, which is what a plain
+        # decline earns on the answerable questions.
+        "answer_then_decline": lambda i: (vocabulary[i.probe_id] or other_answers[:1] or ["42"])[0] + ", I think.",
+        "decline_then_answer": lambda i: (vocabulary[i.probe_id] or other_answers[:1] or ["42"])[0] + ", I think.",
     }
     # The lenient (official-style) and strict judges are the ones scores are reported under, and
     # they must hold the floor.  The generous and graded judges model lax evaluators and accept

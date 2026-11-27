@@ -30,10 +30,10 @@ import math
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
-from ..benchmark.schema import Answer, AnswerKey, Instance, Probe, Session, Turn
+from ..benchmark.schema import QUESTION_TYPES, Answer, AnswerKey, Instance, Probe, Session, Turn
 from ..benchmark.synthetic import generate
 from ..evalcore.calibration import PEER_LOSS, AsymmetricLoss, binomial_sd
-from ..evalcore.criteria import CriteriaFamily
+from ..evalcore.criteria import SCORERS, CriteriaFamily
 from ..evalcore.module import CapabilityTable, EvaluationModule, expected_score, keys_commitment
 from ..evalcore.standard import CAPABILITIES, Standard, normalise
 from ..memory.base import MemorySystem, run_system
@@ -88,6 +88,16 @@ class UnitPolicy:
     # "none" = nothing.
     peer_scope: str = "criteria"
     focused_dev: bool = True  # compare designs on data drawn from my own specialties, not on a balanced set
+    # What a unit strives on.  "lead": the abilities where no rival seen in settled results is more than
+    # ``lead_tol`` ahead of it; designs are compared on data drawn from those abilities, and a change that
+    # lowers any of them under any scoring recipe of the family is refused.  "specialties": expected score
+    # on its specialties, as ``peer_scope`` defines it (the earlier rule, kept for comparison).
+    strive_on: str = "lead"
+    lead_tol: float = 0.10
+    # "tune": settings moves of one or two notches, and peers lend their settings, never their features;
+    # "stock": feature swaps and wholesale copies of peers' designs as well.
+    proposals: str = "tune"
+    exam_floor: float = 0.3  # share of every exam I set spread evenly over all question abilities
     niche: float = 0.5  # 0: specialise where I score highest; 1: where I beat the peers I know
     crowd_aversion: float = 0.2  # avoid abilities many known peers already examine
     scan: int = 2  # other units whose latest profile I glance at each round
@@ -105,6 +115,12 @@ class UnitPolicy:
     def __post_init__(self):
         if self.peer_scope not in ("criteria", "full", "none"):
             raise ValueError(f"unknown peer_scope {self.peer_scope!r}")
+        if self.strive_on not in ("lead", "specialties"):
+            raise ValueError(f"unknown strive_on {self.strive_on!r}")
+        if self.proposals not in ("tune", "stock"):
+            raise ValueError(f"unknown proposals {self.proposals!r}")
+        if not 0.0 <= self.exam_floor < 1.0:
+            raise ValueError("exam_floor must be in [0, 1)")
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -204,6 +220,26 @@ def clamp_config(d: Mapping, budget: int) -> MemoryConfig | None:
         return None
 
 
+def mutate_settings(cfg: MemoryConfig, rng, donor: MemoryConfig | None = None, max_step: int = 2) -> MemoryConfig:
+    """One change to a design's settings that leaves its feature set alone.
+
+    A donor lends all four settings.  Otherwise one setting moves by one or
+    up to ``max_step`` notches, within the ranges ``clamp_config`` allows.
+    """
+    if donor is not None:
+        return replace(cfg, top_k=donor.top_k, abstain_threshold=donor.abstain_threshold,
+                       latest_margin=donor.latest_margin, style=donor.style)
+    move = rng.choice(["top_k", "threshold", "margin", "style"])
+    step = rng.choice(list(range(1, max(1, max_step) + 1)))
+    if move == "top_k":
+        return replace(cfg, top_k=int(min(14, max(2, cfg.top_k + step * rng.choice([-2, 2])))))
+    if move == "threshold":
+        return replace(cfg, abstain_threshold=round(min(0.6, max(0.1, cfg.abstain_threshold + step * rng.choice([-0.05, 0.05]))), 2))
+    if move == "margin":
+        return replace(cfg, latest_margin=round(min(0.95, max(0.3, cfg.latest_margin + step * rng.choice([-0.1, 0.1]))), 2))
+    return replace(cfg, style=rng.choice([x for x in STYLES if x != cfg.style]))
+
+
 # ------------------------------------------------------------------------ unit
 
 class Unit:
@@ -230,6 +266,12 @@ class Unit:
         self.version = 0  # bumps whenever the memory design changes
         self.version_round = 0
         self.table: CapabilityTable | None = None
+        # The design my latest profile describes: what others' evidence about me is about, and so what I
+        # answer with when the society calls on me.  A change I adopt is served once it is published.
+        self.served_cfg = self.memory_cfg
+        # Settled results I know of, by examiner: (examinee, ability table, round).  Mine come from exams
+        # I settled; others' from results on attended feeds that I verified myself.
+        self._results: dict[str, list] = {}
         self.self_score = 0.0
         self._profile_version = -1
         self._published: tuple | None = None
@@ -308,12 +350,20 @@ class Unit:
                 ref = sum(float(v.believed.get(c, (0.0, 0))[0]) for v in peers) / len(peers)
                 with_std = [v for v in peers if v.standard is not None]
                 if with_std:
-                    crowd = sum(1.0 for v in with_std if v.standard.capability_weights.get(c, 0.0) > 0) / len(with_std)
+                    # an ability a peer carries only at floor level is not one it examines
+                    floor = pol.exam_floor / len(QUESTION_TYPES) + 1e-6
+                    crowd = sum(1.0 for v in with_std if v.standard.capability_weights.get(c, 0.0) > floor) / len(with_std)
             niche[c] = mine - pol.niche * ref - pol.crowd_aversion * crowd
         able = [c for c in CAPABILITIES if scores.get(c, (0.0, 0))[0] >= 0.2] or list(scores)
         ranked = sorted(able, key=lambda c: (-niche[c], CAPABILITIES.index(c)))
         top = ranked[: max(1, pol.specialty_count)]
         weights = {c: max(0.05, scores.get(c, (0.0, 0))[0]) for c in top}
+        if pol.exam_floor > 0:
+            # a little of every ability in every exam, so that a unit that alone holds one can be measured on it
+            total = sum(weights.values())
+            weights = {c: (1 - pol.exam_floor) * w / total for c, w in weights.items()}
+            for c in QUESTION_TYPES:
+                weights[c] = weights.get(c, 0.0) + pol.exam_floor / len(QUESTION_TYPES)
         std = self.eval.standard
         new = Standard(std.criterion_weights, weights, std.exam)
         if new.fingerprint() != std.fingerprint():
@@ -336,6 +386,7 @@ class Unit:
         if key != self._published:
             post = self._post("profile", body)
             self._published = key
+            self.served_cfg = self.memory_cfg
             self._standards.append((post.seq, self.eval))
 
     # ---------------------------------------------------------------- feeds
@@ -355,8 +406,9 @@ class Unit:
                     examinee = post.body.get("examinee")
                     if not examinee or examinee == self.id:
                         continue
-                    if self.policy.second_hand <= 0 and rng.random() >= self.policy.audit_rate:
-                        continue  # not relying on relayed signals, and not auditing this one
+                    relies = self.policy.second_hand > 0 or (self.policy.strive_on == "lead" and self.policy.trials_per_round > 0)
+                    if not relies and rng.random() >= self.policy.audit_rate:
+                        continue  # not relying on others' results, and not auditing this one
                     self.stats["audits"] += 1
                     verdict = self._check(post)
                     if not verdict.ok:
@@ -364,6 +416,7 @@ class Unit:
                         continue
                     # a relayed signal is only ever used after I have recomputed it myself
                     self.view(examinee).relayed[verdict.xid] = (peer, verdict.score, verdict.n_items, self.round)
+                    self._note_result(post.author, verdict)
                 elif post.kind == "audit.fail":
                     self._check_accusation(post)
         # A glance at a few other units' latest profile: cheap discovery, not attention.
@@ -595,6 +648,7 @@ class Unit:
             to=st["examinee"],
         )
         self.view(st["examinee"]).first_hand.append((float(verdict.score), int(verdict.n_items), float(verdict.loss), self.round))
+        self._note_result(self.id, verdict)
 
     # -- as examinee
     def _examinee_step(self, examiner: str, xid: Any) -> None:
@@ -741,6 +795,12 @@ class Unit:
                 st["done"] = True
                 self.log.append({"round": self.round, "event": "exam_dropped", "examiner": st.get("examiner"), "why": f"{type(exc).__name__}: {str(exc)[:160]}"})
 
+    def _note_result(self, examiner: str, verdict) -> None:
+        """Keep a settled result's ability table: what rivals have shown they can do."""
+        if verdict.void or not verdict.capability or verdict.examinee in (self.id, examiner):
+            return
+        self._results.setdefault(examiner, []).append((verdict.examinee, dict(verdict.capability), self.round))
+
     # ---------------------------------------------------------------- esteem
     def _update_esteem(self) -> None:
         """Whom do I find high-performing?"""
@@ -838,6 +898,195 @@ class Unit:
     def _strive(self) -> None:
         if self.policy.trials_per_round <= 0:
             return
+        if self.policy.strive_on == "lead":
+            self._strive_on_leads()
+        else:
+            self._strive_on_specialties()
+
+    # -- striving where I lead
+    #
+    # "Be the best in what you do" taken literally.  Striving on my whole set of
+    # specialties, or on what my esteemed peers examine, makes units trade a rare
+    # ability that only they hold for a common one that scores well, and the
+    # society loses its specialists.  So a unit improves only where it is already
+    # at the front, compares designs on data drawn from those abilities, and
+    # refuses any change that costs one of them under any way of scoring it.
+
+    def _blend(self, fn: Callable[[Mapping[str, float]], float]) -> float:
+        """My scoring and my esteemed peers' scoring, mixed as ``specialty_focus`` says."""
+        pol = self.policy
+        mine = fn(self.eval.standard.criterion_weights)
+        if pol.peer_scope == "none":
+            return mine
+        theirs = wsum = 0.0
+        for peer, w in self.attention:
+            std = self.view(peer).standard
+            if std is not None:
+                theirs += w * fn(std.criterion_weights)
+                wsum += w
+        if wsum <= 0:
+            return mine
+        return pol.specialty_focus * mine + (1 - pol.specialty_focus) * theirs / wsum
+
+    def _ability_score(self, table: CapabilityTable, ability: str) -> float:
+        def under(criteria: Mapping[str, float]) -> float:
+            got = table.capability_scores(criteria).get(ability)
+            return got[0] if got else 0.0
+        return self._blend(under)
+
+    def _best_rival(self, examiner: str) -> dict[str, float]:
+        """The best level a unit other than me has shown on each ability in one examiner's settled results.
+
+        Recent results count more; thin evidence is pulled towards that examiner's average for the ability.
+        """
+        pol = self.policy
+        acc: dict[str, dict[str, list[float]]] = {}
+        for examinee, caps, rnd in self._results.get(examiner, ()):
+            fresh = 0.5 ** (max(0, self.round - rnd) / max(0.5, pol.half_life))
+            for cap, (score, n) in caps.items():
+                if n > 0:
+                    a = acc.setdefault(cap, {}).setdefault(examinee, [0.0, 0.0])
+                    a[0] += fresh * n * score
+                    a[1] += fresh * n
+        out: dict[str, float] = {}
+        for cap, by in acc.items():
+            mean = sum(a[0] for a in by.values()) / sum(a[1] for a in by.values())
+            out[cap] = max((a[0] + 6.0 * mean) / (a[1] + 6.0) for a in by.values())
+        return out
+
+    def _sources(self) -> list[tuple[float, Mapping[str, float], dict[str, float]]]:
+        """(weight, scoring, best rival per ability): my own exams, then each esteemed examiner's."""
+        pol = self.policy
+        own = (1.0, self.eval.standard.criterion_weights, self._best_rival(self.id))
+        peers = [(p, w) for p, w in self.attention if self.view(p).standard is not None] if pol.peer_scope != "none" else []
+        wsum = sum(w for _p, w in peers)
+        if wsum <= 0:
+            return [own]
+        return [(pol.specialty_focus, own[1], own[2])] + [
+            ((1 - pol.specialty_focus) * w / wsum, self.view(p).standard.criterion_weights, self._best_rival(p))
+            for p, w in peers
+        ]
+
+    def lead_abilities(self) -> list[str]:
+        """Question abilities I can do where no rival seen is more than ``lead_tol`` ahead of me.
+
+        Every question ability counts, not only my specialties: the one thing I
+        alone can do need not be among the abilities I score highest on.  A tie
+        counts as leading, so twins do not both walk away from what they share.
+        If I lead nowhere: the ability where I am closest to the front.
+        """
+        if self.table is None:
+            return []
+        able = [c for c in QUESTION_TYPES if self._ability_score(self.table, c) >= 0.2]
+        if not able:
+            return []
+        sources = self._sources()
+        margins: dict[str, float] = {}
+        for c in able:
+            num = den = 0.0
+            for w, criteria, rivals in sources:
+                if w > 0 and c in rivals:
+                    got = self.table.capability_scores(criteria).get(c)
+                    num += w * ((got[0] if got else 0.0) - rivals[c])
+                    den += w
+            if den > 0:
+                margins[c] = num / den
+        lead = [c for c in able if c not in margins or margins[c] >= -self.policy.lead_tol]
+        if lead:
+            return lead
+        return [max(margins, key=lambda c: (margins[c], -QUESTION_TYPES.index(c)))]
+
+    def _proposals(self, rng) -> list[MemoryConfig]:
+        if self.policy.proposals == "stock":
+            return self._candidates(rng)
+        budget = self.rules.feature_budget
+        out = [cfg for cfg in (clamp_config(d, budget) for d in self._plan.get("candidates", ())) if cfg is not None]
+        donors = [
+            (clamp_config(self.view(p).design, budget), w)
+            for p, w in self.attention if self.policy.adopt_designs and self.view(p).design
+        ]
+        donors = [(d, w) for d, w in donors if d is not None and d.hash() != self.memory_cfg.hash()]
+        while len(out) < self.policy.trials_per_round:
+            if donors and rng.random() < 0.5:
+                donor = rng.choices([d for d, _ in donors], weights=[w for _, w in donors], k=1)[0]
+                out.append(mutate_settings(self.memory_cfg, rng, donor))
+            else:
+                out.append(mutate_settings(self.memory_cfg, rng))
+        return out[: max(self.policy.trials_per_round, len(self._plan.get("candidates", ())))]
+
+    def _strive_on_leads(self) -> None:
+        pol = self.policy
+        rng = self._rng("strive", self.round)
+        lead = self.lead_abilities()
+        if not lead:
+            return
+        abstain = 0.06  # unanswerable questions stay in the comparison at about the generator's rate
+        focus = {**{c: (1.0 - abstain) / len(lead) for c in lead}, "abstention": abstain}
+        std = self.eval.standard
+        cfg_dev = Standard(std.criterion_weights, focus, std.exam).gen_config(pol.dev_streams, 12)
+        dev = generate(f"{self.spec.seed}:{self.id}:dev:{self.round}", cfg_dev)
+        # The guard: under my scoring, each esteemed peer's, and every single scorer of the family
+        # (the recipes an outside evaluator might use), no lead ability may get worse.
+        checks = [std.criterion_weights]
+        if pol.peer_scope != "none":
+            checks += [self.view(p).standard.criterion_weights for p, _w in self.attention if self.view(p).standard is not None]
+        checks += [{f"{sc}|detect|micro": 1.0} for sc in SCORERS if f"{sc}|detect|micro" in self.eval.family.ids]
+
+        def table_of(memory: MemorySystem, bench) -> CapabilityTable:
+            return CapabilityTable.from_report(self.eval.grade(run_system(memory, bench.probes()), bench.instances))
+
+        def objective(table: CapabilityTable) -> float:
+            return self._blend(lambda criteria: expected_score(table, criteria, focus))
+
+        def holds(new: CapabilityTable, old: CapabilityTable) -> bool:
+            if any(self._ability_score(new, c) < self._ability_score(old, c) for c in lead):
+                return False
+            for criteria in checks:
+                a, b = new.capability_scores(criteria), old.capability_scores(criteria)
+                if any(a.get(c, (0.0, 0))[0] < b.get(c, (0.0, 0))[0] for c in lead):
+                    return False
+            return True
+
+        base_t = table_of(self.memory, dev)
+        base_j = objective(base_t)
+        best_cfg, best_j = self.memory_cfg, base_j
+        seen = {self.memory_cfg.hash()}
+        confirm = None
+        for cfg in self._proposals(rng):
+            if cfg.hash() in seen or len(cfg.features) > self.rules.feature_budget:
+                continue
+            seen.add(cfg.hash())
+            self.stats["trials"] += 1
+            candidate = self._factory(cfg)
+            cand_t = table_of(candidate, dev)
+            j = objective(cand_t)
+            if j <= best_j + pol.min_gain or not holds(cand_t, base_t):
+                continue
+            if pol.replicate:
+                # a win has to repeat, guard and all, on data the comparison has not seen
+                if confirm is None:
+                    bench = generate(f"{self.spec.seed}:{self.id}:confirm:{self.round}", cfg_dev)
+                    confirm = (bench, table_of(self.memory, bench))
+                bench, base_c = confirm
+                cand_c = table_of(candidate, bench)
+                if objective(cand_c) <= objective(base_c) + pol.min_gain / 2 or not holds(cand_c, base_c):
+                    continue
+            best_cfg, best_j = cfg, j
+        if best_cfg.hash() != self.memory_cfg.hash():
+            self._adopt(best_cfg, best_j - base_j, lead=lead)
+
+    def _adopt(self, cfg: MemoryConfig, gain: float, **note: Any) -> None:
+        self.log.append({"round": self.round, "event": "adopt", "from": self.memory_cfg.to_dict(),
+                         "to": cfg.to_dict(), "dev_gain": gain, **note})
+        self.memory_cfg = cfg
+        self.memory = self._factory(cfg)
+        self.version += 1
+        self.version_round = self.round + 1
+        self.stats["adoptions"] += 1
+
+    # -- striving on my specialties (the earlier rule)
+
+    def _strive_on_specialties(self) -> None:
         rng = self._rng("strive", self.round)
         # Under "full" scope every ability matters, so the comparison needs a balanced set;
         # otherwise the set is drawn from my own specialties, where the comparison is decided.
@@ -877,15 +1126,7 @@ class Unit:
                     continue
             best_cfg, best_j = cfg, j
         if best_cfg.hash() != self.memory_cfg.hash():
-            self.log.append({
-                "round": self.round, "event": "adopt", "from": self.memory_cfg.to_dict(),
-                "to": best_cfg.to_dict(), "dev_gain": best_j - base_j,
-            })
-            self.memory_cfg = best_cfg
-            self.memory = self._factory(best_cfg)
-            self.version += 1
-            self.version_round = self.round + 1
-            self.stats["adoptions"] += 1
+            self._adopt(best_cfg, best_j - base_j)
 
     def _conform(self) -> None:
         """Optionally let my belief about scoring drift towards esteemed peers' beliefs."""

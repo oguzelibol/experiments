@@ -398,6 +398,12 @@ def _regressed(cons: Mapping, cap: str, unit: str, fallback: float) -> float:
     return mean + real / (real + own) * (got[0] - mean)
 
 
+def _lowest(cons: Mapping, cap: str, fallback: float) -> float:
+    """The lowest level any unit was measured at on one ability (``fallback`` if nobody was)."""
+    rows = [v[0] for v in cons.get(cap, {}).values() if v[1] > 0]
+    return min(rows) if rows else fallback
+
+
 def _levels(cons: Mapping, cap: str, among: Sequence[str] | None = None) -> float | None:
     rows = [(v[0], v[1]) for u, v in cons.get(cap, {}).items() if among is None or u in among]
     weight = sum(n for _l, n in rows)
@@ -444,8 +450,12 @@ def select_champions(
         for chosen_on, read_from in ((0, 1), (1, 0)):
             wide = {cap: _levels(cons[chosen_on], cap) for cap in caps}
             wide = {cap: v if v is not None else (everyone[cap] if everyone[cap] is not None else 0.3) for cap, v in wide.items()}
+            # For choosing, a unit nobody has measured on an ability is taken to be no better at it than
+            # the weakest unit that has been measured: an unknown is not an average, and ranking it as one
+            # puts it above every unit measured as weak.
+            low = {cap: _lowest(cons[chosen_on], cap, wide[cap]) for cap in caps}
             ranked = sorted(
-                ((u, _class_score(cons[chosen_on], u, cls, wide, prior_strength)[0]) for u in eligible),
+                ((u, _class_score(cons[chosen_on], u, cls, low, prior_strength)[0]) for u in eligible),
                 key=lambda t: (-t[1], t[0]),
             )
             champion = ranked[0][0]

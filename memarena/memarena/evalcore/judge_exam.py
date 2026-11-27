@@ -13,7 +13,7 @@ several numbers, hedged lists of guesses, negated answers), so the reported
 agreement of the heuristic judges is an honest ceiling on what offline grading
 can do, and the same exam can calibrate an LLM judge before it is trusted.
 
-The exam has three parts, reported separately:
+The exam has four parts, reported separately:
 
 ``dev``     cases the heuristic judges' rules were shaped on;
 ``fresh``   cases written afterwards and never used to adjust the rules;
@@ -23,12 +23,26 @@ The exam has three parts, reported separately:
             not how good the judges are.  Four of them can only be told from an
             answer by a key that lists wrong alternatives, as the synthetic
             generator's keys do; those keys end in ``_pool``.
+``review2`` one case per family of phrasing from a second review, which measured
+            the judges in both directions: responses credited without answering
+            (an answer next to a decline, the other option of a choice, a date
+            read as a count, a lower-cased extra item) and natural correct
+            answers rejected (an update that names the old value, a number
+            followed by a date, a list behind a lead-in, a decline in other
+            words).  The labels were written from the rules the judges are
+            meant to follow before the judges were run on them and were not
+            changed afterwards; the rules were written with the review in
+            view, so this part too says what was fixed, not how good the
+            judges are.  Tags start with the letter of the rule family: a
+            unanswerable questions, b ways of declining, c alternatives, d
+            updated values, e numbers, f lists, g hedges, h other correct
+            answers, i normalisation.
 """
 
 from __future__ import annotations
 
 from ..benchmark.schema import AnswerKey
-from ..benchmark.synthetic import CITIES, COUNTRIES, NAMES
+from ..benchmark.synthetic import CITIES, COUNTRIES, NAMES, PREFERENCE_PHRASES, WEEKDAYS
 
 __all__ = ["JUDGE_EXAM", "exam_key"]
 
@@ -77,6 +91,29 @@ _K = {
                              "wrong": [c for c in COUNTRIES if c not in ("Peru", "Nepal", "Japan")]}),
     "sister_pool": dict(qtype="single-session-user", answer="The user never mentioned their sister's name.",
                         abstain=True, meta={"wrong": list(NAMES)}),
+    # Keys for the second review.
+    "pref_pool": dict(qtype="single-session-preference", answer="dark roast",
+                      meta={"rubric": "The user prefers dark roast over light roast for coffee beans. "
+                                      "A correct response reflects that preference.",
+                            "distractors": ["light roast"],
+                            "wrong": [p for p in PREFERENCE_PHRASES if p != "dark roast"]}),
+    "eclipse": dict(qtype="temporal-reasoning", answer="77 days", aliases=("77",),
+                    meta={"numeric": 77, "unit": "days", "tolerance": 1, "numeric_question": True, "wrong": []}),
+    "between": dict(qtype="temporal-reasoning", answer="109 days", aliases=("109",),
+                    meta={"numeric": 109, "unit": "days", "tolerance": 1, "numeric_question": True, "wrong": []}),
+    "gym": dict(qtype="knowledge-update", answer="Tuesdays",
+                meta={"stale": ["Thursdays"], "wrong": [d for d in WEEKDAYS if d != "Tuesdays"]}),
+    "vacation": dict(qtype="single-session-preference", answer="beach resorts",
+                     meta={"rubric": "The user prefers beach resorts over mountain cabins for vacations. "
+                                     "A correct response reflects that preference.",
+                           "distractors": ["mountain cabins"]}),
+    "plan": dict(qtype="single-session-user", answer="Plan A"),
+    "language": dict(qtype="single-session-user", answer="C++"),
+    "grade": dict(qtype="single-session-user", answer="A"),
+    "tokyo": dict(qtype="single-session-user", answer="東京"),
+    "may": dict(qtype="temporal-reasoning", answer="May"),
+    "split": dict(qtype="single-session-user", answer="Split"),
+    "flagged": dict(qtype="temporal-reasoning", answer="18 days", meta={"numeric": True}),
 }
 
 # (key name, question, response, official label, strict label, tag)
@@ -177,6 +214,123 @@ _REVIEW = [
 ]
 
 
+_PREF2_Q = "What is my preference for coffee beans?"
+_ECLIPSE_Q = "How many days ago did I see a solar eclipse?"
+_BETWEEN_Q = "How many days passed between the day I renewed my passport and the day I got a tattoo?"
+_GYM_Q = "Which day do I go to the gym?"
+_VACATION_Q = "What do I prefer when it comes to vacations?"
+_PLAN_Q = "Which plan did I choose?"
+_LANGUAGE_Q = "Which programming language do I use at work?"
+_GRADE_Q = "Which grade did I get?"
+_VISIT_Q = "Which city did I visit?"
+_MOVE_Q = "Which city did I move to?"
+_TRIP_Q = "How many days did the trip last?"
+
+# The second reviewer's phrasing families.  Labels follow the rules, not the judges: see the module
+# docstring.  (key, question, response, official label, strict label, tag)
+_REVIEW2 = [
+    # a. unanswerable questions: a correct decline declines and states no answer
+    ("sister", _SISTER_Q, "I don't know.", 1, 1, "a-plain-decline"),
+    ("sister", _SISTER_Q, "Priya. I don't know.", 0, 0, "a-answer-then-decline"),
+    ("sister", _SISTER_Q, "I don't have that information. Priya.", 0, 0, "a-decline-then-answer"),
+    ("sister", _SISTER_Q, "Your sister's name is Priya. You never mentioned her age.", 0, 0, "a-answer-then-decline-of-something-else"),
+    ("sister", _SISTER_Q, "Priya (you never mentioned anything else).", 0, 0, "a-answer-with-a-declining-aside"),
+    ("sister", _SISTER_Q, "I don't know, but my best guess is Priya.", 0, 0, "a-decline-then-guess"),
+    ("sister", _SISTER_Q, "I don't have that information, and I think it's better not to speculate.", 1, 1, "a-decline-with-a-hedge-word-and-no-answer"),
+    ("sky", _SKY_Q, "I don't have that information. 12 days.", 0, 0, "a-decline-then-number"),
+    ("sky", _SKY_Q, "You never mentioned going skydiving. It was on 2023-03-14.", 0, 0, "a-decline-then-date"),
+    ("sister", _SISTER_Q, "I don't know. \"Priya\"?", 0, 0, "a-decline-then-quoted-span"),
+    ("sister_pool", _SISTER_Q, "You never told me, but it could be dana.", 0, 0, "a-decline-then-lower-cased-pool-value"),
+    ("sister", _SISTER_Q, "pastry chef. I don't know.", 0, 0, "a-bare-phrase-then-decline"),
+    ("sister", _SISTER_Q, "You never mentioned that. Perhaps you are thinking of your friend Dana?", 0, 0, "a-decline-then-a-name-suggested"),
+    ("sister", _SISTER_Q, "You mentioned your cat Luna but not your sister's name.", 1, 1, "a-other-information-but-not-the-asked"),
+    # b. ways of declining
+    ("sister", _SISTER_Q, "The conversation history does not mention that.", 1, 1, "b-history-does-not-mention"),
+    ("sister", _SISTER_Q, "I have no idea.", 1, 1, "b-no-idea"),
+    ("sister", _SISTER_Q, "That isn't something you've shared with me.", 1, 1, "b-not-something-you-shared"),
+    ("sister", _SISTER_Q, "It hasn't come up in our conversations.", 1, 1, "b-has-not-come-up"),
+    ("sister", _SISTER_Q, "I don't think you ever mentioned it.", 1, 1, "b-do-not-think-you-mentioned"),
+    ("sister", _SISTER_Q, "Unknown.", 1, 1, "b-one-word"),
+    ("sister", _SISTER_Q, "There's nothing about that in what you've told me.", 1, 1, "b-nothing-about-that"),
+    ("sister", _SISTER_Q, "I'm not sure; you haven't brought that up.", 1, 1, "b-not-sure-then-decline"),
+    ("sister", _SISTER_Q, "I don't know. I could guess, but I'd rather not.", 1, 1, "b-could-guess-but-does-not"),
+    ("sister", _SISTER_Q, "You never told me, so it could be anything.", 1, 1, "b-could-be-anything"),
+    # c. alternatives: the option bound to the asserting phrase decides
+    ("order", _ORDER_Q, "Before you got a tattoo, you renewed your passport.", 1, 1, "c-order-before-the-other"),
+    ("order", _ORDER_Q, "You got a tattoo after you renewed your passport.", 1, 1, "c-order-the-other-after"),
+    ("order", _ORDER_Q, "You did not renew your passport first; you got a tattoo first.", 0, 0, "c-order-gold-negated"),
+    ("order", _ORDER_Q, "You renewed your passport after you got a tattoo.", 0, 0, "c-order-gold-placed-second"),
+    ("order", _ORDER_Q, "tattoo a get; passport my renew", 0, 0, "c-order-words-reversed"),
+    ("pref", _PREF_Q, "Rather than light roast, you prefer dark roast.", 1, 1, "c-preference-rather-than"),
+    ("pref", _PREF_Q, "Between light roast and dark roast, you prefer dark roast.", 1, 1, "c-preference-between"),
+    ("pref", _PREF_Q, "Instead of dark roast, you go for light roast.", 0, 0, "c-preference-gold-set-aside"),
+    ("pref_pool", _PREF2_Q, "Dark roast over light roast.", 1, 1, "c-preference-over-on-a-generated-key"),
+    ("pref_pool", _PREF2_Q, "dark roast, light roast", 0, 0, "c-preference-both-named"),
+    ("city_pool", _CITY_Q, "It is Lisbon, not Porto.", 1, 1, "c-alternative-dismissed"),
+    ("city_pool", _CITY_Q, "It is Porto, not Lisbon.", 0, 0, "c-gold-dismissed"),
+    ("city_pool", _CITY_Q, "Lisbon and Porto.", 0, 0, "c-two-values-asserted"),
+    # d. updated values: the value marked as current decides
+    ("car", _CAR_Q, "Mazda CX-5 (previously a Honda Civic).", 1, 1, "d-new-previously-old"),
+    ("car", _CAR_Q, "A Mazda CX-5, not the Honda Civic any more.", 1, 1, "d-new-not-old-any-more"),
+    ("car", _CAR_Q, "A Mazda CX-5 - you switched from the Honda Civic.", 1, 1, "d-new-switched-from-old"),
+    ("car", _CAR_Q, "It used to be a Honda Civic, but now it is a Mazda CX-5.", 1, 1, "d-used-to-be-old-now-new"),
+    ("car", _CAR_Q, "Honda Civic (now a Mazda CX-5).", 1, 1, "d-old-now-new"),
+    ("car", _CAR_Q, "It used to be a Mazda CX-5, but now it is a Honda Civic.", 0, 0, "d-used-to-be-new-now-old"),
+    # e. numbers: the number the response commits to for the thing asked
+    ("eclipse", _ECLIPSE_Q, "77 days (roughly 11 weeks).", 1, 1, "e-number-then-rough-conversion"),
+    ("eclipse", _ECLIPSE_Q, "77 days ago, on April 16.", 1, 1, "e-number-then-date"),
+    ("eclipse", _ECLIPSE_Q, "11 weeks.", 1, 1, "e-exact-conversion"),
+    ("eclipse", _ECLIPSE_Q, "77 weeks.", 0, 0, "e-right-number-wrong-unit"),
+    ("eclipse", _ECLIPSE_Q, "Seventy-seven days ago.", 1, 1, "e-number-in-words"),
+    ("passport", _PASSPORT_Q, "It was on 18 March.", 0, 0, "e-date-is-not-a-count"),
+    ("passport", _PASSPORT_Q, "At 6:18 pm.", 0, 0, "e-clock-time-is-not-a-count"),
+    ("passport", _PASSPORT_Q, "18 months ago.", 0, 0, "e-months-for-days"),
+    ("between", _BETWEEN_Q, "109 days passed between the two.", 1, 1, "e-the-two-is-not-a-number"),
+    ("books", _BOOKS_Q, "3 - one more than last time you asked.", 1, 1, "e-one-more-is-not-a-number"),
+    ("books", _BOOKS_Q, "3 (as of 2023-09-08).", 1, 1, "e-as-of-a-date"),
+    ("sum", _SUM_Q, "So 7 in total: 3 from the nursery and 4 from the market.", 1, 1, "e-conclusion-before-the-working"),
+    # f. lists: items are compared on normalised tokens; lead-ins and closings are not items
+    ("trips", _TRIPS_Q, "From what I can see, you have Peru, Nepal and Japan.", 1, 1, "f-lead-in"),
+    ("trips", _TRIPS_Q, "You have 3 of them, namely Peru, Nepal and Japan.", 1, 1, "f-count-then-items"),
+    ("trips", _TRIPS_Q, "Peru, Nepal and Japan. Hope that helps, and let me know if you want more detail.", 1, 1, "f-closing-sentence"),
+    ("trips", _TRIPS_Q, "peru, nepal, japan and chile.", 1, 0, "f-extra-item-in-lower-case"),
+    ("trips_pool", _TRIPS_Q, ", ".join(COUNTRIES), 0, 0, "f-full-pool"),
+    # g. hedges and several candidates, on a key without wrong alternatives
+    ("city", _CITY_Q, "It is Lisbon.", 1, 1, "g-plain-statement"),
+    ("city", _CITY_Q, "You told me Lisbon.", 1, 1, "g-you-told-me"),
+    ("city", _CITY_Q, "My guess is Lisbon.", 1, 0, "g-my-guess"),
+    ("city", _CITY_Q, "Lisbon (unsure).", 1, 0, "g-unsure"),
+    ("city", _CITY_Q, "It's likely Lisbon.", 1, 0, "g-likely"),
+    ("city", _CITY_Q, "Lisbon, as far as I know.", 1, 0, "g-as-far-as-i-know"),
+    ("city", _CITY_Q, "I'd say Lisbon, but don't quote me.", 1, 0, "g-do-not-quote-me"),
+    ("city", _CITY_Q, "Lisbon or Porto.", 0, 0, "g-a-or-b"),
+    ("city", _CITY_Q, "Lisbon / Porto / Valencia", 0, 0, "g-a-slash-b"),
+    ("city", _CITY_Q, "Lisbon? Porto? Valencia?", 0, 0, "g-a-question-b-question"),
+    ("city", _CITY_Q, "One of Lisbon, Porto and Valencia.", 0, 0, "g-one-of"),
+    ("city", _CITY_Q, "Lisbon, unless it was Porto.", 0, 0, "g-unless-it-was"),
+    # h. other correct answers
+    ("game", _GAME_Q, "Which board game did you recommend to me? Patchwork.", 1, 1, "h-question-restated-then-answer"),
+    ("game", _GAME_Q, "Patchwork. That could be useful for planning, reminders, or recommendations.", 1, 1, "h-closing-remark-with-could-be"),
+    ("game", _GAME_Q, "Patchwork. You didn't mention anything else about it.", 1, 1, "h-closing-remark-declines-something-else"),
+    ("gym", _GYM_Q, "On Tuesday.", 1, 1, "h-singular-for-plural"),
+    ("vacation", _VACATION_Q, "You prefer a beach resort.", 1, 1, "h-singular-preference"),
+    ("game", _GAME_Q, "I recommended Jaipur. You also mentioned Patchwork at another point.", 0, 0, "h-reference-only-noted"),
+    ("city", _CITY_Q, "Lisbon. I don't know.", 1, 0, "h-answer-then-decline-on-an-answerable-question"),
+    # i. normalisation
+    ("plan", _PLAN_Q, "Plan B", 0, 0, "i-distinguishing-letter"),
+    ("plan", _PLAN_Q, "Plan A.", 1, 1, "i-article-that-is-part-of-the-name"),
+    ("language", _LANGUAGE_Q, "C#", 0, 0, "i-distinguishing-symbol"),
+    ("language", _LANGUAGE_Q, "C++", 1, 1, "i-symbol-kept"),
+    ("grade", _GRADE_Q, "A", 1, 1, "i-reference-that-normalises-to-nothing"),
+    ("tokyo", _VISIT_Q, "東京", 1, 1, "i-non-latin-reference"),
+    ("may", _MONTH_Q, "It may have been in April.", 0, 0, "i-ordinary-word-is-not-the-name"),
+    ("may", _MONTH_Q, "In May.", 1, 1, "i-ordinary-word-as-a-name"),
+    ("split", _MOVE_Q, "You split your time between Porto and Ghent.", 0, 0, "i-ordinary-word-as-a-verb"),
+    ("flagged", _TRIP_Q, "1", 0, 0, "i-numeric-flag-is-not-the-number-one"),
+    ("flagged", _TRIP_Q, "18 days", 1, 1, "i-numeric-flag-ignored"),
+]
+
+
 def exam_key(name: str, probe_id: str = "exam") -> AnswerKey:
     spec = _K[name]
     return AnswerKey(
@@ -191,5 +345,6 @@ JUDGE_EXAM = [
      "tag": tag, "split": split}
     for i, (split, (k, q, r, o, s, tag)) in enumerate(
         [("dev", c) for c in _CASES] + [("fresh", c) for c in _FRESH] + [("review", c) for c in _REVIEW]
+        + [("review2", c) for c in _REVIEW2]
     )
 ]

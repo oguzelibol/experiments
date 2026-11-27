@@ -5,9 +5,11 @@ scores.  Self-evaluation, peer evaluation, the simulated external evaluator and
 audit re-computation all call it; the caller's identity is not an input.
 
 Per item it computes every base scorer once, then derives the score under each
-criterion in the family.  Rows whose answer never arrived (missing, error,
-timeout, refusal) are scored zero in the headline, because that is what an
-outside evaluator does with a missing answer, but they are counted and reported
+criterion in the family.  Only a row with status ``ok`` or ``truncated`` is an
+answer and is graded on its text.  Every other row (missing, error, timeout,
+refusal, a status this module has never heard of, a text that is not a string)
+was not answered: it is scored zero under every criterion, because that is what
+an outside evaluator does with a missing answer, and it is counted and reported
 separately so that plumbing failures are never mistaken for wrong answers.
 """
 
@@ -25,7 +27,12 @@ from .normalize import is_clean_abstention, tokens
 
 __all__ = ["ItemGrade", "GradeReport", "Grader", "default_judges", "answers_hash"]
 
-_NOT_ANSWERED = ("missing", "error", "timeout", "refused")
+# The statuses whose text is an answer.  Anything else, known or not, is a row that was not answered.
+_GRADED = ("ok", "truncated")
+
+
+def _answered(status) -> bool:
+    return isinstance(status, str) and status in _GRADED
 
 
 def default_judges() -> dict[str, Judge]:
@@ -116,7 +123,7 @@ class GradeReport:
 
     @property
     def n_not_answered(self) -> int:
-        return sum(1 for it in self.items if it.status in _NOT_ANSWERED)
+        return sum(1 for it in self.items if not _answered(it.status))
 
     @property
     def n_truncated(self) -> int:
@@ -150,7 +157,7 @@ class GradeReport:
 
     def answered_only(self) -> "GradeReport":
         """Same report restricted to rows that actually produced an answer."""
-        return GradeReport(self.family, [it for it in self.items if it.status not in _NOT_ANSWERED])
+        return GradeReport(self.family, [it for it in self.items if _answered(it.status)])
 
     def items_root(self) -> str:
         return merkle_root([hash_obj(it.record()) for it in self.items])
@@ -188,11 +195,18 @@ class Grader:
         if answer is None:
             status, text = "missing", ""
         else:
-            status, text = answer.status, answer.text or ""
-        if status in _NOT_ANSWERED:
+            # A row is read defensively: whoever built it may not have gone through ``Answer``.
+            status, text = getattr(answer, "status", "error"), getattr(answer, "text", None)
+            if not isinstance(status, str):
+                status = "error"
+            if not isinstance(text, str):
+                # no text to grade: a failure row, whatever its status claimed
+                status, text = (status if not _answered(status) else "error"), ""
+        answered = _answered(status)
+        if not answered:
             text = ""  # nothing to grade; never score an error message as an answer
         golds = (key.answer,) + tuple(key.aliases)
-        abstained = is_clean_abstention(text)
+        abstained = answered and is_clean_abstention(text, probe.question)
         base: dict[str, float] = {}
         literal: dict[str, float] = {}
         errors: list[str] = []
@@ -205,7 +219,7 @@ class Grader:
             else:
                 base.update(_string_scores(text, golds, key))
         for s, judge in self.judges.items():
-            if status in _NOT_ANSWERED:
+            if not answered:
                 base[s] = 0.0
                 continue
             verdict = judge.judge(probe.question, key, text)

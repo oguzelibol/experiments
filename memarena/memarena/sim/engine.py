@@ -246,14 +246,20 @@ class Simulation:
         self.units.pop(unit_id, None)
 
     # ------------------------------------------------------------------ truth
-    def truth(self, unit: Unit) -> dict:
-        """A unit's real performance on the hidden outside benchmark (never shown to units)."""
-        key = unit.memory.config_hash()
+    def truth(self, unit: Unit, served: bool = False) -> dict:
+        """A unit's real performance on the hidden outside benchmark (never shown to units).
+
+        ``served=True``: of the design the unit has published, which is what the society's evidence
+        about it is about and what it answers the society with.
+        """
+        cfg = getattr(unit, "served_cfg", None) if served else None
+        cfg = cfg if cfg is not None else unit.memory_cfg
+        key = unit._factory(cfg).config_hash()
         hit = self._truth.get(key)
         if hit is None:
             # A fresh system of the same design answers the hidden questions, not the unit's own
             # object: nothing a unit holds is ever shown them.
-            answers = run_system(unit._factory(unit.memory_cfg), self.external.probes())
+            answers = run_system(unit._factory(cfg), self.external.probes())
             report = self.external.grade(answers)
             hit = {
                 "answers": answers,
@@ -331,7 +337,7 @@ class Simulation:
             class_counts[cls] = class_counts.get(cls, 0) + 1
             champ = champion_for(champions, cls, p.probe_id) or fallback
             if champ is not None:
-                composite[p.probe_id] = self.truth(self.units[champ])["answers"][p.probe_id]
+                composite[p.probe_id] = self.truth(self.units[champ], served=True)["answers"][p.probe_id]
         estimate = collective_estimate(champions, class_counts, loss=self.scenario.external.loss, shade=shade)
         outside = self.external.score(composite)
         loss = self.scenario.external.loss(estimate["report"], outside)
@@ -342,7 +348,7 @@ class Simulation:
             crit = {self.scenario.external.criterion_id: 1.0}
 
             def true_class(uid: str) -> float:
-                scores = self.truth(self.units[uid])["table"].capability_scores(crit)
+                scores = self.truth(self.units[uid], served=True)["table"].capability_scores(crit)
                 return sum(w * scores.get(c, (0.0, 0))[0] for c, w in caps.items())
 
             best = max(true_class(u) for u in members)

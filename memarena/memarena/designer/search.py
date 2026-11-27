@@ -128,6 +128,11 @@ ABLATIONS: dict[str, Any] = {
     "peer_scope_flipped": lambda d: replace(d, policy=replace(
         d.policy, **({"peer_scope": "criteria", "focused_dev": True} if d.policy.peer_scope == "full"
                      else {"peer_scope": "full", "focused_dev": False}))),
+    # strive on specialties (or on leads, if the design strives on specialties)
+    "strive_on_flipped": lambda d: replace(d, policy=replace(
+        d.policy, strive_on="specialties" if d.policy.strive_on == "lead" else "lead")),
+    # exams hold only the examiner's specialties (or a 30% floor of every ability, if they did)
+    "exam_floor_flipped": lambda d: replace(d, policy=replace(d.policy, exam_floor=0.0 if d.policy.exam_floor > 0 else 0.3)),
     # sit exams of random units instead of the ones it esteems
     "attention_random": lambda d: replace(d, policy=replace(d.policy, explore=1.0)),
     # specialise where the absolute score is highest, ignoring peers and crowding
